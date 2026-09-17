@@ -1,0 +1,1219 @@
+# DUSTWOOD GULCH — Authoritative Build Spec (DESIGN.md)
+Single source of truth for the Wild-West FPS. Supersedes any earlier plan. Every number, name and signature here wins. Implementers read §0–§2 completely, then the sections for their modules.
+## Environment (verified 2026-09-17)
+three r185 at vendor/three/three.module.js, addons at vendor/three/addons/ (SMAAPass() takes no args; UnrealBloomPass(resolution, strength, radius, threshold); OutputPass(); ShaderPass(shader, textureID); EffectComposer(renderer); BufferGeometryUtils.mergeGeometries(geoms, useGroups); SimplexNoise; OrbitControls all exist). Node 22, node serve.js 8080, Playwright headless Chromium with SwiftShader WebGL2. test/harness.js calls window.__game.step(dt) with dt in seconds. Not a git repo. No bundler, no TypeScript, no framework, no external asset files, no network requests at runtime.
+---
+## 0. Scope, tiers, conflict resolutions
+### 0.1 What we are building (user intent → features)
+| Requirement | Where it lives |
+|---|---|
+| Beautifully detailed 3D western town, ≥10 buildings | §3, town.js, buildings.js, props.js, textures.js, materials.js, lighting.js, post.js |
+| FPS vs cowboy enemies, 3 anchors (window/roof/barricade) | §4.5, §5, enemies.js, rig.js |
+| ≥2 weapons, tracers, recoil, muzzle flash, sfx | §4.2–4.4, weapons.js, viewmodels.js, particles.js |
+| Mission: entrance → sectors → Saloon Showdown → jail → free prisoner → Win | §4.6, mission.js, prisoner.js |
+| three.js, browser, WASD+mouse, R reload, F interact | index.html + importmap, static server |
+| Headless-testable debug API | §9, debug.js |
+### 0.2 Tiers
+* **Tier 1 (must ship)**: everything not tagged [T2]/[T3]. Line budget: Tier 1 + tests ≈ 11 k, hard ceiling 12 k (wc -l src/*.js index.html style.css test/*.js). Visual detail is the project; do not trim it to hit a round number.
+* **Tier 2 [T2]**: each < 150 lines, isolated, only after smoke/perf/shots pass on Tier 1; ≤ 1.5 k total.
+* **Tier 3 [T3]**: Appendix B; never before the T2 gate.
+### 0.3 Conflict resolutions (final, do not re-litigate)
+| Topic | Decision |
+|---|---|
+| Era | Brief says "early 18th century" → interpreted 1800–1840 (documented in code as DESIGN NOTE). Cartridge rifles (Winchester) kept. If strict 1700s required, swap to flintlock muskets — aesthetics unchanged. |
+| Street axis | X along Main Street; −X = town entrance (west), +X = Sheriff's office (east). Z across the street. |
+| Yaw convention | yaw 0 = −Z, forward = (−sin yaw, 0, −cos yaw), camera.rotation.set(pitch, yaw, roll, 'YXZ'). |
+| step/setTime | step(dt) = one tick + render; setTime(t) fast-forwards by ticking (countdown state machines need it). |
+| Viewmodel | Child of camera in the main scene, near 0.07, viewmodel ≥ 0.12 m from camera. |
+| Weapons | Revolver / rifle / shotgun, §4.2 tables. Shotgun fires 9 thin tracers (visible tracers are a hard requirement). |
+| Enemy archetypes | Window Shooter / Roof Sniper / Barricade Shotgunner, anchored state machine [Idle→Peek→Aim→Fire→Duck→Reload]. No NavMesh, no free roaming. |
+| Lights | Fixed count created at init, never re-parented/hidden (r185 shader recompile rule). No shadow maps — baked AO + blob shadows. |
+| Post chain | Render → Bloom → OutputPass → SMAA → Grade. Bloom strength 0.5, radius 0.4, threshold 0.9, half-res. |
+| Fog | FogExp2 0x0a0d10, density 0.02 (street readable end to end ~120 m). |
+| Environment map | CubeCamera capture of the built scene, once at init, 128 px, PMREM. |
+| Key mechanic | Key found in Sheriff's office (on the desk, dropped by the last barricade shotgunner). Pick up with F, then F on the cell door to unlock, OR shoot the lock. Free prisoner ⇒ Win. |
+| Player eye/speeds | eye 1.65, walk 4.2, sprint 6.6, radius 0.35. |
+| Event names | kebab-case (enemy-killed). |
+| Damage per part | head = weapon headshot mult, torso 1.0, limbs 0.75. |
+| Textures/materials | textures.js helpers + generators + getTexture(name); materials.js MAT registry via getMaterial(name), AO strips, env capture. UVs in metres for tiling. |
+| Shadows | No shadow maps. Blob shadows under enemies/player, vertex AO, AO strips. |
+| Town name | DUSTWOOD GULCH. Page title "Dustwood Gulch". |
+| Health regen | 6 s delay, 5 HP/s. |
+| HUD | Static DOM in index.html with fixed ids (§8.1). |
+Everything else: where only one doc speaks, it stands unless contradicted here.
+---
+## 1. SHARED CONVENTIONS
+### 1.1 Units, axes, frames
+* 1 unit = 1 metre, seconds, radians (degrees only in constants fields with a Deg suffix). Y up, right-handed.
+* X runs along Main Street. −X = west (town entrance), +X = east (Sheriff's office). Z across the street; south = −Z, north = +Z.
+* Origin (0,0,0) = centre of the street at the Saloon. Street floor y = 0.
+* Yaw/pitch: yaw about +Y, pitch about +X, camera.rotation.order = 'YXZ', camera.rotation.set(pitch, yaw, roll). forward = (−sin yaw, 0, −cos yaw), right = (cos yaw, 0, −sin yaw). yaw 0 looks −Z; yaw = −π/2 looks +X (toward the Sheriff's office); yaw = +π/2 looks −X (toward the entrance); yaw = π looks +Z. pitch ∈ [−1.45, +1.45], positive = up. utils.yawFromDir(dx, dz) = Math.atan2(−dx, −dz).
+* Player: capsule radius 0.35, height 1.80, eye height 1.65 (feet at pos.y = floorHeightAt).
+* Enemy body radius = ENEMY_TYPES[type].radius (window 0.35, roof 0.35, barricade 0.40).
+### 1.2 Town coordinate layout (master table — also encoded in constants.js §1.13)
+| Element | X | Y | Z | Notes |
+|---|---|---|---|---|
+| Main Street | −60 … +60 | top 0, thickness 0.30 | −6 … +6 | packed sand, wagon ruts, dry puddles |
+| Boardwalk (south) | −60 … +60 | 0 | −6 … −8 | wooden planks, sagging |
+| Boardwalk (north) | −60 … +60 | 0 | +6 … +8 | wooden planks |
+| Building lots | −60 … +60 | 0 | ±[8 … 14] | buildings sit here |
+| Player spawn | −58 | 0 | 0 | yaw = −π/2 (facing +X, down the street) |
+| Saloon | centre x = −6 | 0 | −11 | two-story, balcony, swinging doors, piano, bottles |
+| Livery Stable | centre x = +8 | 0 | +11 | open gates, hayloft, stalls, ladder |
+| Church | centre x = +22 | 0 | +11 | bell tower, whitewash, small graveyard |
+| Sheriff / Police | centre x = +56 | 0 | −11 | reinforced, iron bars, 2 jail cells, wanted posters |
+| Generic houses ×6 | x ∈ {−30, −18, +2, +14, +30, +42} | 0 | alternating ±11 | warped planks, hand-painted signs |
+| Barricades | x ∈ {−40, −24, +10, +34, +48} | 0 | z = 0 | overturned wagon, barrels, crates |
+| Jail cells | x = +56 | 0 | −11 | 2 cells, iron bars, prisoner in cell 1 |
+| Graveyard | x = +22 … +30 | 0 | +11 … +14 | wooden crosses, headstones |
+### 1.3 Walkable floor — town.floorHeightAt(x, z)
+Returns floor height or null. Implemented analytically in town.js:
+```
+if (x ≥ −60 && x ≤ 60 && |z| ≤ 6.0) → 0 // street
+if (x ≥ −60 && x ≤ 60 && 6.0 < |z| ≤ 8.0) → 0 // boardwalks
+if (x ≥ −60 && x ≤ 60 && 8.0 < |z| ≤ 14.0) → 0 // building lots (walkable between buildings)
+else → null
+```
+town.walkable = same regions as rects for clamping. Buildings register colliders so the player cannot walk through them.
+### 1.4 Colliders (collision.js)
+```js
+/** @typedef {{type:'box', min:[x,y,z], max:[x,y,z], tag:string, surface:Surface, mask:number, id:number}} BoxCollider */
+/** @typedef {{type:'cyl', x:number, z:number, r:number, y0:number, y1:number, tag:string, surface:Surface, mask:number, id:number}} CylCollider */
+/** Surface = 'wood'|'adobe'|'sand'|'metal'|'glass'|'stone'|'none' */
+MASK = { PLAYER:1, ENEMY:2, BULLET:4, NAV:8, SOLID:15, WALKERS:3 }
+```
+* Movement is 2-D in XZ; a mover of radius r at feet height y participates only with colliders whose [min.y, max.y] overlaps [y + 0.05, y + 1.0].
+* Static colliders registered in init() by town.js and props.js.
+* Broad phase: statics bucketed into 8 m slabs along X.
+### 1.5 Nav grid (nav.js)
+Uniform grid, cell 0.5 m, origin (−60, −6), 240 columns (x ∈ [−60, 60]) × 24 rows (z ∈ [−6, 6]). Cell blocked if floorHeightAt(cellCentre) === null or any MASK.NAV collider inflated by NAV.agentRadius = 0.3 overlaps it. Flow field = Dijkstra from the player's cell over 8-connected cells. Recomputed when the player's cell changes, at most every 0.25 s. Enemies read nav.flowAt(x, z, out). Boot-time assertion: Dijkstra from PLAYER_SPAWN gives finite distanceAt at every barricade anchor and every building anchor point.
+### 1.6 Anchor points (enemy spawn)
+```js
+/** @typedef {{ id:string, kind:'window'|'roof'|'barricade', pos:THREE.Vector3, yaw:number, cover:THREE.Vector3, building:string }} Anchor */
+```
+Each building module exposes anchors: window (inside a window frame, leans out), roof (on a roof/balcony/hayloft/tower), barricade (behind a barricade). Enemy population table (§1.13 ENEMY_POP): Saloon = 3–4 window + 1 balcony roof; Livery = 1 hayloft roof; Church = 1 tower roof; Sheriff = 2 barricade + 2 window. Guaranteed ≥ 10 houses.
+### 1.7 Update loop and deterministic stepping (main.js)
+FIXED_DT = 1/60, MAX_SUBSTEPS = 4.
+```
+frame(nowMs): // requestAnimationFrame (real-time mode only)
+dtReal = clamp((nowMs − lastMs)/1000, 0, 0.1); lastMs = nowMs
+if (!G.paused && !G.manual) acc += dtReal
+n = 0; while (acc ≥ FIXED_DT && n < MAX_SUBSTEPS) { stepOnce(); acc −= FIXED_DT; n++ }
+if (n === MAX_SUBSTEPS) acc = 0
+renderOnce()
+stepOnce(): // the ONLY place update() is called
+G.time += FIXED_DT; G.frame++
+input.update(); player.update(dt); nav.update(dt); weapons.update(dt); enemies.update(dt);
+mission.update(dt); prisoner.update(dt); particles.update(dt); decals.update(dt);
+lighting.update(dt); props.update(dt); audio.update(dt); hud.update(dt); debug.recordTick()
+renderOnce():
+player.render(); enemies.render(); weapons.render(); particles.render(); lighting.render(); post.render()
+```
+* No interpolation: rendering shows the state after the last tick.
+* Manual stepping (G.manual = true): RAF does not advance the sim or render on its own; only checks G.renderDirty. __game.step(dt, n=1) runs n ticks then renders once. __game.setTime(t) ticks at 1/60 without rendering until G.time ≥ t, then renders once. __game.start() from script enables manual stepping by default.
+* FPS/timing: real-time = EMA over last 30 RAF frames; manual = 1000/renderMs of renders actually performed. stepMs = EMA of last 60 stepOnce costs; renders = monotonic count; initMs = boot time.
+* All gameplay time from dt and G.time. State machines use countdowns (this.t −= dt), never comparisons against G.time.
+* Forbidden in systems: performance.now, Date.now, Math.random, requestAnimationFrame, setTimeout, setInterval, scene.add in update. Allowed: main.js (frame pacing, fps), audio.js (micro-jitter), hud.js (fps text), textures.js/materials.js/utils.bakeVertexAO at init only.
+### 1.8 Event bus (bus.js) and catalogue
+```js
+export class Bus {
+constructor() { this.map = new Map(); this.ring = []; this.ringHead = 0; this.ringCap = 512; this.time = 0; }
+on(name, fn) -> off(); off(name, fn); once(name, fn) -> off(); clear();
+emit(name, payload = {}) // synchronous; copies {t:this.time, type:name, data:summary(payload)} into the ring
+}
+```
+| Event | Payload | Emitter | Listeners |
+|---|---|---|---|
+| game-start | {} | main | hud, audio, mission |
+| game-restart | {} | main | all |
+| game-over | {reason:'killed'\|'prisoner'} | mission | hud, audio, player |
+| game-win | {time, kills} | mission | hud, audio |
+| sector-enter | {sector, name} | mission | hud, audio |
+| sector-clear | {sector, kills} | mission | hud, audio |
+| showdown-start | {} | mission | hud, audio |
+| showdown-clear | {} | mission | hud, audio |
+| enemy-spawn | {enemy, anchorId} | enemies | mission, audio |
+| enemy-hit | {enemy, part, group, damage, pos, normal, dir, weapon, killed, headshot} | enemies.applyDamage | particles, decals, audio, hud |
+| enemy-killed | {enemy, type, part, weapon, headshot, pos, dir} | enemies | mission, hud, audio, weapons |
+| enemy-duck | {enemy} | enemies | audio |
+| enemy-peek | {enemy} | enemies | audio |
+| player-hit | {damage, health, from:pos, enemy} | player.applyDamage | hud, audio, player |
+| player-death | {reason} | player | mission, hud, audio |
+| shot-fired | {weapon, origin, dir, muzzle, pellets} | weapons | audio, hud, particles |
+| shot-hit-world | {pos, normal, surface, weapon, tag} | weapons | decals, particles, audio |
+| weapon-empty | {weapon} | weapons | audio, hud |
+| weapon-reload-start | {weapon, duration, empty} | weapons | audio, hud |
+| weapon-reload-end | {weapon} | weapons | audio |
+| weapon-switch | {weapon, prev} | weapons | hud, audio |
+| key-pickup | {pos} | prisoner | hud, audio |
+| cell-unlocked | {} | prisoner | hud, audio |
+| prisoner-freed | {} | prisoner | mission, hud, audio |
+| prisoner-death | {} | prisoner | mission, hud, audio |
+| debug-message | {text} | any | hud |
+### 1.9 RNG and determinism
+utils.mulberry32(seed) → rng() ∈ [0,1) with rng.range(a,b), rng.int(n), rng.pick(arr), rng.sign(), rng.gauss(), rng.seed(n), rng.state(). Two generators: G.rngBuild (seed = ?seed= or 1337, all procedural construction) and G.rng (gameplay: spawns, spread, AI jitter, effects; reseeded by __game.seed(n) without rebuilding textures). Two runs with same seed + API sequence produce identical getState(), getEnemies(), getEvents().
+### 1.10 Pooling
+utils.Pool(capacity, factory): acquire() (steals oldest when exhausted), tryAcquire(), release(item), forEachActive(fn), reset(). Everything runtime-spawned is pooled and pre-added to the scene in init(): enemies (24), tracers (96), casings (64), particles (2 × 4096 GPU), smoke sprites (48), muzzle flash planes (3), decals (holes 256 / splats 128 / pools 24), blob shadows (40). Pools reset() on restart. No geometry/material creation after init(). Warm-up render (§2.3) with one instance of everything showing before pools empty themselves.
+### 1.11 Performance budgets (test/perf.js, 24 enemies, 1080p)
+| Item | Budget | Notes |
+|---|---|---|
+| Draw calls | ≤ 400 (target 300) | town ≤ 90 merged/instanced, props ≤ 60, enemies 2 each (48) + blob 1, effects ≤ 10, viewmodel ≤ 6, glow batches ≤ 3, post 5 |
+| Triangles | ≤ 1.5 M (target 900 k) | enemy ≤ 3.5 k; town ≤ 400 k; props ≤ 250 k |
+| Real lights | 12 exactly | hemi 1 + street lamps 6 + saloon interior 2 + muzzle 1 + sheriff 2; no castShadow; all direct scene children |
+| Textures | ≤ 220 GPU | hero colour maps 1024², normal/roughness 512², registry cached by name |
+| Shader programs | ≤ 64 | post ≈ 13; share materials |
+| Init time | ≤ 5 s desktop; headless SwiftShader informational (warning > 45 s) | noise tiles cached; no generator > 400 ms |
+| Update CPU | ≤ 4 ms/tick with 24 enemies | flow field ≤ 0.25 s; spatial hash |
+| GPU frame | ≤ 14 ms @ 1080p | bloom half-res, SMAA, no SSAO |
+| Allocation | zero per tick steady state | scratch vectors, pools |
+Quality: post.setQuality('low'|'high'); ?lowfx=1 = pixel ratio 1, bloom quarter-res, no SMAA, no dust motes. headless implies pixel ratio 1 and nothing else (full post chain stays on).
+### 1.12 Code conventions
+* ES2022 modules, named exports only. import * as THREE from 'three'; addons via 'three/addons/<path>.js'. 2-space indent, semicolons, const by default. JSDoc typedefs for exported shapes.
+* Every system exports one class: constructor(G), init(), update(dt), optional render(), reset(), dispose(). Systems never import other system modules; they reach each other via G.<system> and G.bus. Leaf modules (importable by anyone): constants.js, bus.js, utils.js, collision.js, textures.js, materials.js. Helper modules importable only by their owner: rig.js (enemies), viewmodels.js (weapons).
+* Module-level scratch: const _v1 = new THREE.Vector3(); — no allocations in update/render.
+* Scene-graph rules: createContext does scene.add(camera); every light and SpotLight.target is a direct child of scene; nothing that must keep rendering is ever parented under an object whose visible flag changes.
+* Layers (LAYERS): viewmodel meshes layers.set(LAYERS.VIEWMODEL) exclusively; effect pools, decals, blob shadows, enemies layers.set(LAYERS.NO_ENV) exclusively; main camera layers.enable(VIEWMODEL) + enable(NO_ENV); env-capture CubeCamera renders layer 0 only.
+* Static meshes: matrixAutoUpdate = false, updateMatrix() once. Per-frame instanced pools: instanceMatrix.setUsage(DynamicDrawUsage).
+* Colours: hex ints; colour textures colorSpace = SRGBColorSpace; data textures NoColorSpace.
+* If a spec point is ambiguous, pick the simplest reading that keeps the API and add // DESIGN NOTE: at the top of the module.
+### 1.13 src/constants.js (verbatim — the integrator writes this exactly)
+```js
+import * as THREE from 'three';
+export const FIXED_DT = 1 / 60;
+export const MAX_SUBSTEPS = 4;
+export const DEFAULT_SEED = 1337;
+export const VERSION = '1.0.0';
+// ---- World layout (metres) ----
+export const STREET = { xMin: -60, xMax: 60, zMin: -6, zMax: 6, y: 0, thickness: 0.30 };
+export const BOARDWALK = { zInner: 6.0, zOuter: 8.0 };
+export const LOT = { zInner: 8.0, zOuter: 14.0 };
+export const PLAYER_SPAWN = { pos: [-58, 0, 0], yaw: -Math.PI / 2, pitch: 0 };
+export const BUILDINGS = {
+saloon: { x: -6, z: -11, w: 14, d: 10, h: 8.5, variant: 0 },
+livery: { x: 8, z: 11, w: 16, d: 10, h: 7.0, variant: perm },
+church: { x: 22, z: 11, w: 10, d: 12, h: 9.0, variant: perm },
+sheriff: { x: 56, z: -11, w: 14, d: 10, h: 6.5, variant: perm },
+house: [ { x: -30, z: -11 }, { x: -18, z: 11 }, { x: 2, z: -11 },
+{ x: 14, z: -11 }, { x: 30, z: 11 }, { x: 42, z: -11 } ],
+};
+export const BARRICADES = [ // [x, kind]
+[-40, 'wagon'], [-24, 'barrels'], [10, 'crates'], [34, 'wagon'], [48, 'barrels'] ];
+export const ENEMY_POP = {
+saloon: { window: 4, roof: 1 }, // balcony
+livery: { roof: 1 }, // hayloft
+church: { roof: 1 }, // tower
+sheriff: { window: 2, barricade: 2 },
+};
+export const SECTORS = [
+{ id: 1, name: 'TOWN ENTRANCE', xMin: -60, xMax: -40 },
+{ id: 2, name: 'MAIN STREET', xMin: -40, xMax: -6 },
+{ id: 3, name: 'SALOON SHOWDOWN', xMin: -6, xMax: 10 }, // midpoint set-piece
+{ id: 4, name: 'FINAL PUSH', xMin: 10, xMax: 56 },
+];
+// ---- Lighting / atmosphere ----
+export const LIGHTS = {
+hemi: { sky: 0xb8c4d8, ground: 0x6a4a2a, intensity: 0.35 },
+street: { xs: [-50, -38, -26, -14, 2, 14, 26, 38, 50], y: 4.0, z: 0, color: 0xffe2b8, intensity: 20, distance: 12, decay: 2 },
+saloon: { x: -6, y: 4.0, z: -11, color: 0xffc878, intensity: 25, distance: 14, decay: 2 },
+sheriff: { x: 56, y: 4.0, z: -11, color: 0xffe2b8, intensity: 22, distance: 14, decay: 2 },
+muzzle: { color: 0xffb050, distance: 10, decay: 2 },
+total: 12, // hemi 1 + street 6 + saloon 1 + sheriff 2 + muzzle 1
+};
+export const FOG = { color: 0x0a0d10, density: 0.02 };
+export const ENV = { size: 128, intensity: 0.6, capturePos: [0, 1.6, 0] };
+export const POST = { bloomStrength: 0.5, bloomRadius: 0.4, bloomThreshold: 0.9, exposure: 1.0,
+vignette: 0.45, grain: 0.06, ca: 0.0018, saturation: 0.92, maxPixelRatio: 1.5, maxPixelWidth: 2560 };
+// ---- Player ----
+export const PLAYER = { radius: 0.35, height: 1.8, eyeHeight: 1.65, walkSpeed: 4.2, sprintSpeed: 6.6,
+accel: 40, friction: 12, maxHealth: 100, regenDelay: 6.0, regenRate: 5.0, lowHealth: 30,
+fov: 75, sprintFov: 80, near: 0.07, far: 260, mouseSens: 0.0022, maxPitch: 1.45,
+bobWalkHz: 1.9, bobSprintHz: 2.6, bobAmpWalk: 0.035, bobAmpSprint: 0.05, footstepEvery: 0.55 };
+// ---- Weapons ----
+export const WEAPONS = {
+revolver: { id: 'revolver', name: 'COLT PEACEMAKER', mode: 'semi', damage: 40, headMult: 3.0, rpm: 240, mag: 6, reserve: 24, maxReserve: 36,
+pellets: 1, spreadDeg: 0.6, moveSpreadDeg: 0.8, bloomDeg: 0.4, maxBloomDeg: 2.5, bloomRecoverDegPerS: 5, bloomDelay: 0.08,
+fullRange: 18, minRange: 40, minFactor: 0.7, kickPitchDeg: 1.6, kickYawDeg: 0.4, kickRamp: 0.05, kickRecover: 0.16,
+vmKickBack: 0.05, vmKickUpDeg: 3.0, reload: 2.2, reloadEmpty: 2.6, reloadTransfer: 0.70, lower: 0.22, raise: 0.28,
+flashScale: 0.35, flashLight: 8, tracerRadius: 0.012, tracerLen: 0.9, casing: 'brass44', sfx: 'revolverShot' },
+rifle: { id: 'rifle', name: 'WINCHESTER', mode: 'lever', damage: 30, headMult: 2.5, rpm: 120, mag: 8, reserve: 32, maxReserve: 48,
+pellets: 1, spreadDeg: 0.8, moveSpreadDeg: 0.7, bloomDeg: 0.3, maxBloomDeg: 3.0, bloomRecoverDegPerS: 6, bloomDelay: 0.06,
+fullRange: 25, minRange: 50, minFactor: 0.6, kickPitchDeg: 1.3, kickYawDeg: 0.3, kickRamp: 0.04, kickRecover: 0.13,
+vmKickBack: 0.04, vmKickUpDeg: 2.0, reload: 2.4, reloadEmpty: 2.8, reloadTransfer: 0.70, lower: 0.28, raise: 0.32,
+flashScale: 0.45, flashLight: 10, tracerRadius: 0.012, tracerLen: 0.9, casing: 'brass44', sfx: 'rifleShot' },
+shotgun: { id: 'shotgun', name: 'DOUBLE-BARREL', mode: 'break', damage: 15, headMult: 1.5, rpm: 40, mag: 2, reserve: 12, maxReserve: 20,
+pellets: 9, spreadDeg: 0.8, moveSpreadDeg: 0.6, bloomDeg: 1.2, maxBloomDeg: 3.0, bloomRecoverDegPerS: 4, bloomDelay: 0.15,
+patternRingDeg: [1.6, 2.3], patternRingCount: [3, 5], patternJitterDeg: 0.3,
+fullRange: 6, minRange: 18, minFactor: 0.25, kickPitchDeg: 4.0, kickYawDeg: 0.8, kickRollDeg: 0.6, kickRamp: 0.06, kickRecover: 0.26,
+vmKickBack: 0.09, vmKickUpDeg: 5.0, shotTime: 0.12, breakTime: 0.80, breakEjectAt: 0.25,
+reloadStart: 0.35, reloadShell: 0.55, reloadEnd: 0.40, lower: 0.30, raise: 0.38,
+flashScale: 0.7, flashLight: 18, tracerRadius: 0.006, tracerLen: 0.5, casing: 'hull12', sfx: 'shotgunShot' },
+};
+export const WEAPON_ORDER = ['revolver', 'rifle', 'shotgun'];
+export const GROUP_MULT = { torso: 1.0, arm: 0.75, leg: 0.75 };
+export function damageMultiplier(group, weaponId, enemyType) {
+if (group === 'head') return Math.min(WEAPONS[weaponId].headMult, ENEMY_TYPES[enemyType].headMultCap);
+return GROUP_MULT[group] ?? 1.0;
+}
+export const RECOIL = { holdTime: 0.05, vmSpringK: 220, vmSpringD: 18, vmRotK: 260, vmRotD: 20 };
+export const BALLISTICS = { maxDist: 120, tracerSpeed: 280, tracerMinDist: 1.5, tracerMinTime: 0.035, tracerMaxTime: 0.11 };
+// ---- Enemies ----
+export const ENEMY_TYPES = {
+window: { hp: 60, radius: 0.35, headR: 0.14, headMultCap: 99, anchor: 'window', points: 1, vocalPitch: [0.9, 1.1] },
+roof: { hp: 80, radius: 0.35, headR: 0.14, headMultCap: 99, anchor: 'roof', points: 2, vocalPitch: [1.1, 1.3] },
+barricade: { hp: 100, radius: 0.40, headR: 0.15, headMultCap: 99, anchor: 'barricade', points: 3, vocalPitch: [0.7, 0.9] },
+};
+export const ENEMY = { poolSize: 24, corpseCap: 10, corpseTime: 9, deathFallTime: 0.9, restTwitchTime: 0.4,
+sinkTime: 1.5, sinkDepth: 2.2, hitFlashTime: 0.08, boundingR: 1.6, lodDistance: 45,
+peekTime: [0.8, 1.4], aimTime: [0.5, 0.9], fireTime: 0.1, duckTime: [0.9, 1.6], reloadTime: [1.5, 2.5],
+fireRange: 45, fireAccuracyDeg: [0.5, 2.0], damage: [8, 14], vocalEvery: [3, 9], maxVoices: 6 };
+// ---- Mission ----
+export const MISSION = { introTime: 2.0, sectorClearTime: 3.0, showdownIntro: 2.0 };
+export const PRISONER = { cellPos: [56, 0, -11], interactDist: 1.6, interactCosAngle: 0.766, keyPos: [56, 1.0, -11] };
+// ---- Effects ----
+export const FX = { tracers: 96, casings: 64, particles: 4096, smoke: 48, decalsHoles: 256, decalsSplats: 128,
+decalsPools: 24, dustMotes: 600, casingLife: 8, decalLife: 90, flashLife: 0.055, smokeLife: 0.6, decalOffset: 0.006 };
+// ---- Budgets / misc ----
+export const BUDGET = { drawCalls: 400, triangles: 1_500_000, lights: 12, programs: 64,
+textures: 220, canvasTextures: 160, gpuMB: 250, initMsHeadless: 45000, initMsDesktop: 5000, stepMs: 8 };
+export const LAYERS = { DEFAULT: 0, VIEWMODEL: 1, NO_ENV: 2 };
+export const UP = new THREE.Vector3(0, 1, 0);
+export const FONTS = {
+SIGN: 'bold 64px Georgia, "Times New Roman", "DejaVu Serif", serif',
+STENCIL: '900 96px Impact, "Arial Black", "DejaVu Sans", sans-serif',
+MONO: 'bold 48px "Courier New", "DejaVu Sans Mono", monospace',
+};
+```
+---
+## 2. MODULE CONTRACTS
+### 2.0 File layout, ownership, line budgets
+| File | Owner | ~Lines | Notes |
+|---|---|---|---|
+| index.html | Integrator | 90 | importmap, canvas, static HUD DOM (§8.1) |
+| style.css | Integrator | 180 | HUD/overlay styles |
+| src/constants.js | Integrator | 240 | §1.13 verbatim |
+| src/bus.js | Integrator | 60 | Bus + event ring |
+| src/utils.js | Integrator | 320 | rng, math, Pool, SpatialHash, Spring, geometry, ray tests, bakeVertexAO |
+| src/collision.js | Integrator | 260 | Colliders registry, raycast, circle resolve |
+| src/main.js | Integrator | 320 | boot, G, loop, opts, restart, resize, error capture |
+| src/input.js | Integrator | 170 | keyboard/mouse → InputState; debug injection |
+| src/debug.js | Integrator | 320 | window.__game |
+| src/hud.js | Integrator | 340 | DOM HUD, screens, hit markers, arcs, vignette |
+| src/textures.js | Agent-TEX | 1200 | canvas helpers + noise tiles + every texture generator + getTexture |
+| src/materials.js | Agent-TEX | 280 | MAT registry, aoStrip, env capture |
+| src/decals.js | Agent-TEX | 200 | bullet holes / blood splats / pools |
+| src/town.js | Agent-TOWN | 1400 | street, boardwalks, lots, buildings, barricades, colliders, floorHeightAt, anchors, AO |
+| src/buildings.js | Agent-TOWN | 900 | Saloon, Livery, Church, Sheriff, generic houses; anchor points |
+| src/props.js | Agent-TOWN | 850 | barricades, cacti, shrubs, dead trees, tumbleweeds, puddles, wagon ruts, signs |
+| src/lighting.js | Agent-LIGHT | 500 | 12 lights, street lamps, glow batches, shafts, env capture, fog |
+| src/post.js | Agent-LIGHT | 210 | composer chain, GradeShader, quality, resize |
+| src/particles.js | Agent-LIGHT | 480 | GPU Points, tracers, casings, muzzle flash, smoke, dust motes, blob shadows |
+| src/player.js | Agent-PLAYER | 380 | look, move, collide, bob, health, damage, death camera |
+| src/weapons.js | Agent-PLAYER | 700 | 3 weapon state machines, firing, ballistics, recoil, reload/break/switch, ammo |
+| src/viewmodels.js | Agent-PLAYER | 480 | procedural gun + hand meshes, part poses |
+| src/rig.js | Agent-ENEMY | 450 | bone hierarchy, merged geometry, hit capsules, animation clips |
+| src/enemies.js | Agent-ENEMY | 850 | pool, anchored AI, hit volumes, damage, death, vocals, blob shadows |
+| src/nav.js | Agent-MISSION | 240 | flow field + reachability assertion |
+| src/mission.js | Agent-MISSION | 380 | sector progression, showdown, final push, win/lose |
+| src/prisoner.js | Agent-MISSION | 200 | key, cell lock, free/dead states |
+| src/audio.js | Agent-AUDIO | 720 | WebAudio engine, buses, reverb, positional voices, all recipes |
+| test/harness.js | (exists) | — | withGame(fn, opts) |
+| test/smoke.js | Agent-MISSION | 260 | end-to-end |
+| test/perf.js | Agent-MISSION | 100 | renderer.info budgets |
+| test/shots.js | Agent-LIGHT | 140 | screenshot checklist → test/shots/*.png |
+| dev/*.html | any | opt. | standalone harness pages |
+Tier-1 game code ≈ 10.5 k + tests ≈ 0.5 k ≈ 11 k; hard ceiling 12 k. Per-file figures ±20 % tolerance; a file at 1.5× its budget means stop and talk to the integrator.
+Agent packages (7 parallel): Integrator; TEX; TOWN; LIGHT; PLAYER; ENEMY; MISSION (+ nav, tests); AUDIO. If fewer agents: merge LIGHT into TEX, MISSION into ENEMY.
+### 2.1 The context object G (built by main.createContext)
+```js
+G = {
+opts, bus, rng, rngBuild, time: 0, frame: 0,
+renderer, scene, camera, canvas, hudRoot, overlayRoot,
+colliders, envMap: null, stats,
+started: false, paused: false, gameOver: false, manual: false, lowHealth: 0,
+renderDirty: false,
+hooks: { start(opts), restart(), stepOnce(), renderOnce() },
+input, town, props, particles, decals, lighting, post, nav, player, weapons, enemies,
+mission, prisoner, audio, hud,
+};
+```
+Two-phase boot. Phase 1: main.boot() constructs every system (new X(G)). Phase 2: init() in the order above; a system's init() may only call systems earlier in the list. initMaterials(G.renderer, G.opts.seed) runs right after createContext and before phase 1.
+### 2.2 index.html (Integrator)
+```html
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Dustwood Gulch</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><link rel="stylesheet" href="style.css">
+<script type="importmap">{"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/addons/"}}</script>
+</head><body><canvas id="c"></canvas><div id="hud">…§8.1…</div><div id="overlay">…§8.1…</div>
+<script type="module" src="./src/main.js"></script></body></html>
+```
+### 2.3 src/main.js (Integrator)
+parseOpts(search) → opts: headless = ?headless=1 || (navigator.webdriver === true && ?headless !== '0'); manual = headless; lowfx = ?lowfx=1 ONLY; nopost = ?nopost=1 || ?post=0; audio = ?audio=0 ? false : !headless; debug = ?debug=1; seed = int(?seed) || DEFAULT_SEED; viewer = ?viewer=1.
+createRenderer(canvas, opts): antialias:false, powerPreference:'high-performance', toneMapping ACESFilmic, exposure POST.exposure, outputColorSpace SRGB, shadowMap.enabled=false, pixelRatio = (lowfx || headless) ? 1 : min(devicePixelRatio, POST.maxPixelRatio).
+createContext(canvas, opts) → G: renderer, scene, camera (fov PLAYER.fov, near/far; camera.layers.enable(1)+enable(2); scene.add(camera)), bus, rng, rngBuild, colliders, stats, G.hooks.
+boot() → G: unless window.__NO_AUTOBOOT: createContext, installDebugApi(G) (early: ready=false), initMaterials, phase 1 construct, phase 2 init, WARM-UP (one real renderOnce + one sampleLuminance, then pools empty), start RAF, record initMs + programsBaseline, set __game.ready = true.
+start(G, {manual}): idempotent; hides #start; pointer lock (real-time); audio.unlock(); G.started = true; G.manual = manual ?? opts.manual; bus 'game-start'; mission.begin().
+restart(G): G.time = 0; G.frame = 0; bus.ring cleared; G.gameOver = false; G.paused = false; every system reset(); bus 'game-restart'; mission.begin(). RNG not reseeded.
+stepOnce(G); renderOnce(G): §1.7; renderOnce clears G.renderDirty and bumps getPerf().renders.
+Warm-up: every system's init() leaves pooled objects visible with something to draw (one instance parked at y = −50 or scale 0); boot() performs one full renderOnce + one sampleLuminance; then warmupDone() hides placeholders. getPerf().programsBaseline recorded; test asserts programs === baseline at every later sample.
+Error capture: global error/unhandledrejection/console.error mirrored into __game.errors[]; exceptions inside stepOnce caught, pushed, rethrown once. Module loading: main.js imports each system with await import('./x.js') in try/catch → NullSystem on failure. FPS: real-time = EMA over 30 RAF frames; manual = 1000/renderMs. Standalone: node serve.js 8080, open /?debug=1; ?viewer=1 = no enemies/mission, OrbitControls fly-through.
+### 2.4 src/input.js (Integrator)
+```js
+export class Input {
+constructor(G); init(); update(); reset(); dispose();
+attach(domElement); detach();
+move: THREE.Vector2; moveWorld: THREE.Vector2|null;
+lookDelta: {x, y}; sprint, fire, fireJustPressed, fireJustReleased, reload, interact, restart: boolean;
+switchTo: number; cycle: number; lastWeapon: boolean;
+setMove(strafe, forward); setMoveWorld(dx, dz|null); addLook(dx, dy); pressFire(); holdFire(bool);
+pressReload(); pressSwitch(index); pressInteract(); setSprint(b);
+}
+```
+Keys: WASD/arrows, Shift sprint, LMB fire, R reload, 1/2/3 weapon, wheel cycle (debounced 120 ms), Q last, F interact, Enter/click restart on game over, Esc = pointer-lock exit. Sensitivity PLAYER.mouseSens rad/px.
+### 2.5 src/utils.js (Integrator)
+mulberry32(seed) → rng; clamp, lerp, damp, smoothstep, easeIn/OutCubic, easeOutBack, wrapAngle, lerpAngle, degToRad; yawFromDir, dirFromYaw; Pool; SpatialHash; Spring; Spring3; makeBox(w,h,d); makePlane(w,h); transformGeo; mergeGeos; ensureColorAttr; bakeVertexAO(geo, occluders, {radius, strength, floorY}); setInstance; hideInstance; raySphere; rayCapsule; rayBox; rayCylinderY; circleVsBox; circleVsCircle; closestPointSegment; TMP = {v1..v4, q1, m1, e1, c1}.
+### 2.6 src/collision.js (Integrator)
+```js
+export class Colliders {
+constructor(G);
+addStatic(c) -> c; addStaticBox(min[3], max[3], tag, surface, mask=MASK.SOLID) -> BoxCollider;
+addStaticCyl(x, z, r, y0, y1, tag, surface, mask=MASK.SOLID) -> CylCollider;
+removeStatic(c); setDynamic(key, list); clearDynamic(key);
+statics: Collider[]; dynamics: Map<string, Collider[]>;
+raycast(origin, dir, maxDist, mask, out) -> RayHit|null;
+resolveCircle(pos, radius, mask, yFeet=pos.y, height=1.0, ignoreTags=null) -> pos;
+overlapsCircle(x, z, r, mask, yFeet=0, height=1.0) -> bool;
+forEachInRange(xMin, xMax, mask, fn);
+debugGroup() -> THREE.Group;
+}
+```
+### 2.7 src/bus.js (Integrator) — §1.8.
+### 2.8 src/textures.js (Agent-TEX)
+initTextures(renderer, seed); makeCanvas(w,h); rngFor(name); noise2; fbm; noiseTile(seed, octaves, size); sampleTile(tile, u, v, {rot, ox, oy, scale}); fillNoise; grimeOverlay; drips; scratches; heightToNormal; packRoughMetal; toTexture(canvas, {srgb, repeat, wrap, aniso, mipmaps}); textOnCanvas; lineBullet; getTexture(name, variant) → TextureSet; getTextureStats(); disposeAllTextures(); TEXTURE_META; TEXTURE_NAMES.
+Rules: colour maps sRGB; data maps NoColorSpace; generators use rngFor(name) only; fonts from FONTS; tiling textures seamless; no generator calls fbm() per pixel — sample noiseTile. Standalone: dev/textures.html.
+### 2.9 src/materials.js (Agent-TEX)
+initMaterials(renderer, seed); getMaterial(name); cloneMaterial(name, overrides); MAT proxy; makeAoStrip(length, width, alpha); makeBlobShadowMaterial(); captureEnvironment(G); applyEnvironment(tex); getEnvironment(); disposeAllMaterials(); MATERIAL_NAMES.
+Why envMap per material: r185 overwrites envMapIntensity with scene.environmentIntensity for materials whose own envMap === null. With material.envMap set, per-material intensities are honoured.
+### 2.10 src/decals.js (Agent-TEX)
+```js
+export class Decals {
+constructor(G); init(); update(dt); reset(); dispose();
+addBulletHole(pos, normal, surface); // wood=dark hole, adobe=chip, sand=dust, metal=bright scratch, glass=crack
+addBloodSplat(pos, normal, size=0.35);
+addBloodPool(pos, size=1.2);
+}
+```
+Subscribes: shot-hit-world → hole (skips 'none'); enemy-hit → floor splat; enemy-rest → pool FX.poolDelay later. 3 InstancedMesh ring buffers (holes 256, splats 128, pools 24), oriented quaternion.setFromUnitVectors(+Z, normal), offset FX.decalOffset, polygonOffset, depthWrite false, transparent, renderOrder 1.
+### 2.11 src/town.js (Agent-TOWN)
+```js
+export class Town {
+constructor(G); init(); update(dt); reset(); dispose();
+group: THREE.Group;
+floorHeightAt(x, z) -> number|null; // §1.3
+walkable: {minX,maxX,minZ,maxZ,y}[]; // street + boardwalks + lots
+anchors: Anchor[]; // from buildings.js
+playerSpawn: { pos:V3, yaw, pitch };
+getLightAnchors() -> { streetLamps:V3[], saloon:V3, sheriff:V3[], shafts:{top,bottom,rTop,rBottom,color}[] };
+}
+```
+Owns geometry (§3.3): street slab (packed sand, wagon ruts, dry puddles), boardwalks (warped planks), building lots, barricades (overturned wagon, barrels, crates), cacti, dry shrubs, dead trees, tumbleweeds, distant mesas, sky. Registers all static colliders (§3.4). Vertex AO via utils.bakeVertexAO. Merge by material into ≤ 90 draw calls; ≤ 400 k tris. Never creates lights. Standalone: dev/town.html.
+### 2.12 src/buildings.js (Agent-TOWN, imported only by town.js)
+```js
+export function buildBuilding(G, def) -> Building
+/** @typedef {{ group:THREE.Group, anchors:{window:V3[], roof:V3[], barricade:V3[]}, colliders:BoxCollider[], name:string }} Building */
+```
+Modules: Saloon (two-story, swinging doors, balcony, piano, bottles, hand-painted SALOON sign), Livery (open gates, hayloft, horse stalls, ladder, LIVERY STABLE sign), Church (bell tower, whitewash, simple cross, small graveyard with wooden crosses), Sheriff (reinforced, iron bars, 2 jail cells, wanted posters, SHERIFF sign), generic houses (warped planks, sagging porches, hand-painted signs). Each exposes anchor points (window/roof/barricade positions). ≤ 60 draw calls, ≤ 250 k tris.
+### 2.13 src/props.js (Agent-TOWN)
+```js
+export class Props {
+constructor(G); init(); update(dt); reset(); dispose();
+group: THREE.Group;
+}
+```
+Owns (§3.5): barricades (overturned wagon, barrels, crates), cacti, dry shrubs, dead trees, tumbleweeds, dry puddles, wagon ruts, signs, wanted posters, hay bales, horse stalls, piano, bottles, wooden crosses. Animated: tumbleweed rolling (scripted), sign sway. Registers colliders for everything the player can bump. ≤ 60 draw calls, ≤ 250 k tris.
+### 2.14 src/lighting.js (Agent-LIGHT)
+```js
+export class Lighting {
+constructor(G); init(); update(dt); render(); reset(); dispose();
+lights: { hemi, street:PointLight[6], saloon:PointLight, sheriff:PointLight[2], muzzle:PointLight }; // 12
+flashMuzzle(worldPos, intensity);
+glowBatches: InstancedMesh[]; // ≤ 3 billboard batches
+setGlow(batch, i, pos, size, color, alpha);
+}
+```
+Owns: all 12 lights (created in init as direct scene children, never re-parented), scene.fog = FogExp2(FOG), scene.background, captureEnvironment(G) call, street lamp globes (emissive), glow cards, light shafts (truncated cones, additive gradient, fresnel fade), dust motes. Flicker schedules seeded (G.rngBuild) and driven by G.time. Standalone: dev/town.html?lighting=1.
+### 2.15 src/post.js (Agent-LIGHT)
+```js
+export class Post {
+constructor(G); init(); render(); resize(w, h); reset(); dispose();
+composer: EffectComposer|null;
+grade: ShaderPass; // uniforms: time, hurt, lowHealth, vignette, grain, ca, saturation, dead
+setQuality('low'|'high'); setHurt(v); setLowHealth(v); setDead(v);
+sampleLuminance() -> number;
+renderInfo() -> { calls, triangles, points, lines, geometries, textures, programs };
+}
+```
+Chain: RenderPass → UnrealBloomPass(new Vector2(w, h), POST.bloomStrength, POST.bloomRadius, POST.bloomThreshold) → OutputPass → SMAAPass → ShaderPass(GradeShader). Low quality: pass (w/2, h/2), no SMAA, pixel ratio 1. ?nopost=1 bypasses composer.
+### 2.16 src/particles.js (Agent-LIGHT)
+```js
+export class Particles {
+constructor(G); init(); update(dt); render(); reset(); dispose();
+emit(kind, pos, {count, dir, spread, speed, life, size, gravity, color, drag, sizeEnd, alpha});
+smoke(pos, dir, {count, size, sizeEnd, life, alpha});
+tracer(from, to, radius, len);
+ejectCasing(kind, pos, vel, angVel);
+muzzleFlash(muzzleWorld, dir, scale, variant);
+impact(pos, normal, surface, weaponId);
+blood(pos, dir, {count, headshot});
+blobShadows: InstancedMesh; // 40 discs; index 0 = player, 1+ = enemies
+setBlob(i, pos, radius, alpha);
+}
+```
+Two THREE.Points (additive/alpha), capacity FX.particles each, custom ShaderMaterial with attributes aPos0, aVel, aBorn, aLife, aSize, aColor, aAlpha and uniforms uTime, uGravity, uScale. Casings: CPU integration, gravity 9.81, bounce restitution 0.35/0.7, rest after 3 bounces, life FX.casingLife. Dust motes: Points of FX.dustMotes in the street volume, CPU sine drift. Frustum culling off on pools. Subscribes: shot-fired → smoke + embers; shot-hit-world → impact; enemy-hit → blood. ≤ 10 draw calls.
+### 2.17 src/player.js (Agent-PLAYER)
+```js
+export class Player {
+constructor(G); init(); update(dt); render(); reset(); dispose();
+pos: V3 (feet), vel: V3, yaw, pitch, roll, health, alive, dead, sprinting;
+recoil: { pitch, yaw, roll }; recoilTarget: { pitch, yaw, roll };
+viewRoot: THREE.Group; eye: V3;
+getForward(out) -> out; getRight(out) -> out;
+getAimRay(outOrigin, outDir);
+aimAt(x, y, z); setLook(yaw, pitch); syncCamera();
+applyDamage(amount, fromPos, enemy, {knockback, heavy});
+heal(amount); setHealth(h);
+teleport(x, z, yaw?, pitch?);
+shake(amplitudeRad, time);
+god: boolean;
+}
+```
+Behaviour: §4.1. Camera: camera.position = pos + (0, eyeHeight + bobY, 0) + lateral bob·right; camera.rotation.set(pitch + recoil.pitch + shakePitch, yaw + recoil.yaw + shakeYaw, roll + recoil.roll + bobRoll, 'YXZ'). Movement uses G.colliders.resolveCircle(pos, PLAYER.radius, MASK.PLAYER, pos.y) and G.town.floorHeightAt. Footsteps every PLAYER.footstepEvery m → player-footstep. Death camera §4.7.
+### 2.18 src/weapons.js (Agent-PLAYER)
+```js
+export class Weapons {
+constructor(G); init(); update(dt); render(); reset(); dispose();
+current: WeaponState; list: WeaponState[3]; index: number; lastIndex: number;
+switchTo(indexOrId) -> string; switchLast(); reload() -> boolean; fire() -> boolean;
+setTrigger(bool); triggerDown: boolean;
+getAmmo() -> { mag, reserve }; getAmmoAll();
+getName() -> string; getSpreadDeg() -> number; getState() -> WeaponState.state;
+addAmmo(weaponId, rounds); resupplyAll(); infiniteAmmo: boolean; canFire() -> boolean;
+}
+```
+Firing: §4.2–4.3. Calls: G.player.getAimRay, G.enemies.raycast, G.colliders.raycast(…, MASK.BULLET), G.enemies.applyDamage, G.particles.tracer/muzzleFlash/ejectCasing, G.lighting.flashMuzzle, writes G.player.recoilTarget, G.hud.onShot(), emits shot-fired, shot-hit-world, weapon-*. Viewmodels from viewmodels.js, attached to G.player.viewRoot.
+### 2.19 src/viewmodels.js (Agent-PLAYER, imported only by weapons.js)
+buildViewmodel(id:'revolver'|'rifle'|'shotgun') → Viewmodel; poseFire(vm, id, t); setSlideLocked(vm, locked); poseReload(vm, id, t, empty); poseShotgunReload(vm, phase, t); poseBreak(vm, t); poseSwitch(vm, t, lowering); resetPose(vm).
+Geometry: §3.7. ≤ 6 draw calls and ≤ 12 k tris per weapon. Materials from materials.js (gunmetal, brass, gunWood, skinHands, sightGlow).
+### 2.20 src/rig.js (Agent-ENEMY, imported only by enemies.js)
+BONE_NAMES (21); PART_NAMES (17); PART_GROUP; HIT_CAPSULES; buildRigGeometry(type, variant) → BufferGeometry; createSkeleton(type, scaleParams); applyScaleParams; CLIPS = { idle, peek, aim, fire, duck, reload, flinch, death, corpse }; blendPoses; applyPose; PoseBuffer; makeVariantMaterial(variant).
+### 2.21 src/enemies.js (Agent-ENEMY)
+```js
+export class Enemies {
+constructor(G); init(); update(dt); render(); reset(); dispose();
+spawn(type, anchor:Anchor|null, opts:{pos?, yaw?, state?, hp?}) -> Enemy|null;
+killAll({silent}) -> number; kill(enemy, weaponId='debug');
+raycast(origin, dir, maxDist, out) -> EnemyHit|null;
+applyDamage(enemy, part, damage, point, dir, weaponId) -> { killed, headshot, staggered };
+alive: Enemy[]; aliveCount; corpseCount; totalKilled;
+forEachAlive(fn); nearestTo(pos) -> Enemy|null; byId(id) -> Enemy|null; getAll() -> Enemy[];
+aiEnabled: boolean; speedScale: number;
+hitVolumeCenter(enemy, group, out) -> out;
+}
+```
+Behaviour: §4.5 (anchored AI), §5 (rig/animation). Uses G.nav.flowAt, G.town.floorHeightAt, G.colliders.resolveCircle(…, MASK.ENEMY), G.player.applyDamage, G.particles.setBlob, G.decals via bus, G.audio via bus. States idle/peek/aim/fire/duck/reload/dead/corpse/sinking are hittable; dead+ are not. update(dt) does everything that affects hits. Damage ownership: damage passed to applyDamage is FINAL; weapons.js computes it from hit.group, constants.damageMultiplier, range falloff. Synchronous spawn: evaluates the initial clip, applies it, refreshes capsules and blob shadow before returning.
+### 2.22 src/nav.js (Agent-MISSION)
+```js
+export class Nav {
+constructor(G); init(); update(dt); reset(); dispose();
+build(); // rasterize floorHeightAt + MASK.NAV colliders; Dijkstra from PLAYER_SPAWN; reachability assertion at every anchor
+setTarget(x, z); flowAt(x, z, out) -> out;
+isWalkable(x, z) -> bool; nearestWalkable(x, z, out) -> out; distanceAt(x, z) -> number;
+randomWalkable(minDistFromTarget, out) -> out;
+debugMesh() -> Object3D;
+}
+```
+update(dt) calls setTarget(G.player.pos.x, G.player.pos.z) itself.
+### 2.23 src/mission.js (Agent-MISSION)
+```js
+export class Mission {
+constructor(G); init(); update(dt); reset(); dispose();
+sector: number; state: 'idle'|'intro'|'active'|'sectorClear'|'showdown'|'finalPush'|'win'|'lose';
+begin(); skipToSector(n);
+queue: {type, anchorId}[]; spawnedThisSector; totalThisSector; killsThisSector;
+}
+```
+Behaviour: §4.6. Uses G.enemies.spawn/killAll/byId, G.prisoner, G.player, G.hud, listens to enemy/player/prisoner events, emits sector/showdown/game events. Spawn queue built lazily at sector transitions (never in begin()/reset()) so seed(n) right after restart() fully determines the run.
+### 2.24 src/prisoner.js (Agent-MISSION)
+```js
+export class Prisoner {
+constructor(G); init(); update(dt); reset(); dispose();
+state: 'locked'|'free'|'dead';
+keyHeld: boolean; cellUnlocked: boolean;
+interact() -> boolean; // F: pick up key / unlock cell / free prisoner
+shootLock(); // shoot the cell lock
+}
+```
+Behaviour: §4.6. Key on the Sheriff's desk (or dropped by the last barricade shotgunner). F on key → keyHeld; F on cell door → unlock; F on prisoner → free ⇒ Win. Shooting the lock also unlocks. Prisoner death (enemy fire) ⇒ Lose.
+### 2.25 src/audio.js (Agent-AUDIO)
+```js
+export class Audio {
+constructor(G); init(); update(dt); reset(); dispose();
+enabled: boolean; ctx: AudioContext|null; state: 'enabled'|'disabled'|'locked';
+unlock(); disable(); enable();
+play(name, {pos?, gain=1, rate=1, delay=0}) -> Voice|null;
+startLoop(name, {pos?, gain}) -> LoopHandle|null; stopLoop(handle, fadeTime=0.3); setLoopParam(handle, param, value);
+setListener(pos, forward, up); setDuck(lowpassHz|null); setMasterGain(v);
+master, sfxBus, ambBus, uiBus, reverb; voicesActive: number;
+}
+```
+Engine + recipes + bus subscriptions: §7.
+### 2.26 src/hud.js (Integrator)
+```js
+export class Hud {
+constructor(G); init(); update(dt); reset(); dispose();
+showStart(); hideStart(); showPause(); hidePause(); showGameOver(stats, reason); showWin(stats);
+banner(text, sub='', seconds=2.0); prompt(text|null); toast(text, seconds=2);
+hitMarker(kind:'hit'|'head'|'kill'); damageFrom(worldPos); onShot();
+setFps(fps); setHidden(bool); hidden: boolean; setHint(text|null);
+}
+```
+Behaviour: §8. Reads weapons.getAmmo/getName/getSpreadDeg/getState, player.health, mission.sector, prisoner.state. Subscribes to the bus. Calls G.post.setHurt/setLowHealth/setDead.
+### 2.27 src/debug.js (Integrator)
+installDebugApi(G) → api — sets window.__game (§9) immediately in boot() with ready = false. Lifecycle calls go through G.hooks. debug.skipToSector(n) is if (G.gameOver) G.hooks.restart(); G.mission.skipToSector(n); return getState().
+### 2.28 Dev harness template (dev/*.html)
+Same pattern as Fable §2.27: window.__NO_AUTOBOOT = true; import createContext/parseOpts; initMaterials; new Town(G).init(); OrbitControls; loop.
+### 2.29 Cross-module call map
+| Caller | Calls |
+|---|---|
+| main | every system's init/update/render/reset (+ warmupDone); post.render/sampleLuminance; debug.installDebugApi; G.hooks; hud.showStart/hidePause/showPause; audio.unlock; mission.begin |
+| player | town.floorHeightAt, colliders.resolveCircle, enemies.forEachAlive (push), post.setHurt/setLowHealth/setDead, particles.setBlob, input.* |
+| weapons | player.getAimRay/recoilTarget/viewRoot/vel/sprinting, enemies.raycast/applyDamage, colliders.raycast, particles.tracer/muzzleFlash/ejectCasing, lighting.flashMuzzle, hud.onShot, input.* |
+| enemies | nav.flowAt/isWalkable/nearestWalkable, town.floorHeightAt/walkable, colliders.resolveCircle/raycast, player.pos/applyDamage, particles.setBlob/blood |
+| nav | town.floorHeightAt, colliders.statics (NAV mask), player.pos |
+| mission | enemies.spawn/aliveCount/killAll/byId, prisoner.*, player.heal/pos/getForward, hud.prompt/banner, input.interact |
+| prisoner | player.pos/getForward, colliders.raycast (lock), hud.prompt, input.interact |
+| lighting | town.getLightAnchors, materials.captureEnvironment, G.time |
+| props | town.getLightAnchors, colliders.addStatic*, particles.smoke |
+| particles | town.floorHeightAt (casings), player.vel, camera (flash parent), audio.play('casingBounce') |
+| decals | bus only |
+| audio | bus + player.pos/getForward |
+| hud | weapons.*, player.health/yaw, mission.*, prisoner.state, post.setHurt/…, stats |
+| debug | everything through G; lifecycle through G.hooks; look/teleport to player.setLook/teleport/aimAt; movement to input.setMove/setMoveWorld; killAllEnemies → enemies.killAll(); skipToSector → restart hook if game over, then mission.skipToSector |
+---
+## 3. VISUAL SPEC
+The town in one paragraph: a sun-bleached Wild West town at high noon, a packed-sand Main Street with wagon ruts and dry puddles running west-to-east, flanked by warped-plank boardwalks and a dozen buildings — a two-story Saloon with swinging doors and a balcony, a Livery Stable with open gates and a hayloft, a whitewashed Church with a bell tower and a small graveyard, a reinforced Sheriff's office with iron-barred jail cells at the far end, and generic houses with sagging porches and hand-painted signs. Hard midday shadows under porches, light shafts through plank gaps, dust motes in the air, distant mesas under a vast washed-out blue sky. Palette: sun-bleached wood beige, dust ochre, rust red, faded saloon red, deep shadow brown. The town must never look flat-lit — alternating pools of light and hard shadows are the identity.
+### 3.1 Texture generator table (getTexture(name, variant); all canvas; sizes in px; meters = physical coverage of one tile)
+| name | size | meters | maps | recipe |
+|---|---|---|---|---|
+| woodPlank (v0,v1) | 1024² | 2×2 | map, normal, rough | warped planks, sun-bleached beige #c8b088, grain Béziers, knots, nail heads, chipped edges, grime bottom |
+| woodWorn | 512² | 1×1 | map, rough | darker, more wear, cracks |
+| adobe | 1024² | 4×4 | map, normal, rough | ochre #b08a5a, fbm mottle, peeling patches, cracks |
+| sand | 1024² | 4×4 | map, normal, rough | packed sand #d8c8a0, wagon ruts, pebbles, dust |
+| boardwalk | 512×128 | 1×0.25 | map, rough | warped planks, gaps, nail heads |
+| rust | 512² | 1×1 | map, normal, roughMetal | rust blooms, pits, remaining paint |
+| saloonRed | 512² | 1×1 | map, rough | faded saloon red #8a3a2a, chipped paint |
+| churchWhite | 512² | 1×1 | map, rough | whitewash #e8e0d0, peeling, cracks |
+| hay | 512² | 1×1 | map, rough | straw, bales |
+| signSaloon | 512×256 | none | map | "SALOON" hand-painted, FONTS.SIGN |
+| signSheriff | 512×256 | none | map | "SHERIFF" |
+| signLivery | 512×256 | none | map | "LIVERY STABLE" |
+| wantedPoster | 512×768 | none | map | wanted poster, face, text |
+| crossWood | 256² | none | map | wooden cross |
+| barrelWood | 512² | 1×1 | map, rough | barrel staves, hoops |
+| crateWood | 512² | 1×1 | map, rough | crate planks |
+| wagonWood | 512² | 1×1 | map, rough | wagon planks, iron |
+| cactus | 256² | none | map+alpha | saguaro cactus |
+| shrub | 256² | none | map+alpha | dry shrub |
+| deadTree | 512² | none | map+alpha | dead tree |
+| tumbleweed | 256² | none | map+alpha | tumbleweed |
+| mesa | 1024² | none | map | distant mesa silhouette |
+| sky | 1024² | none | map | washed-out blue, harsh sun |
+| gunMetalRough | 512² | 0.5×0.5 | rough | brushed lines, scratches |
+| gunWood | 512² | 0.5×0.5 | map | walnut grain |
+| muzzleFlash | 512² (2×2 atlas) | none | map+alpha | radial white → orange → 0, 4 variants |
+| spriteAtlas | 512² (4×4) | none | map+alpha | smoke, spark, blood, chip, dust, glow |
+| decalHoles, decalBlood, decalPool | 256² / 1024² / 512² | none | map+alpha | pockmarks; maroon splats; radial pool |
+| glowRadial, shaftGradient, lensStar, blobShadow | 128² / 64×256 / 256² / 128² | none | alpha | radial; vertical α; star; radial |
+Packing: roughMetal textures carry roughness in G and metalness in B. Every tiling texture seen at eye level gets two seeds (variants 0/1) alternated per bay. Resolution tiers: hero colour maps 1024², normal/roughness 512², labels 256² or atlas. Estimated GPU total ≤ 250 MB with mipmaps.
+### 3.2 Material registry (getMaterial(name) / MAT.name) — all MeshStandardMaterial unless stated, envMapIntensity 0.6 unless stated
+| name | notes |
+|---|---|
+| woodPlank, woodWorn, adobe, sand, boardwalk, rust, saloonRed, churchWhite, hay | vertexColors:true |
+| barrelWood, crateWood, wagonWood | vertexColors:true |
+| signBlack | #111214 rough 0.3 |
+| signEnamel | hand-painted signs |
+| paper | posters, rough 0.8 |
+| gunmetal | metal 0.85 rough 0.4 + gunMetalRough |
+| brass | metal 0.9 rough 0.35 |
+| gunWood | walnut grain |
+| skinHands | skin map, rough 0.65 |
+| sightGlow | emissive #ff8a1a × 2 |
+| glass | MeshPhysicalMaterial transmission 0, roughness 0.05, transparent, opacity 0.25, envMapIntensity 1.5, depthWrite false |
+| puddle | MeshPhysicalMaterial #202020, roughness 0.04, clearcoat 1, envMapIntensity 2.0, transparent 0.85 |
+| aoStrip | MeshBasic black, gradient alpha map, transparent, depthWrite false |
+| blobShadow | MeshBasic black, blobShadow alpha, transparent, depthWrite false |
+| additive | MeshBasic AdditiveBlending, transparent, depthWrite false, toneMapped:false |
+| tracer | MeshBasic #ffd9a0 additive, transparent, depthWrite false, toneMapped:false |
+| casingBrass | (0.85,0.65,0.3) metal 0.9 rough 0.35 |
+| decalHole, decalBlood, decalPool | Standard transparent, polygonOffset −2, depthWrite false |
+| enemy-<variant> | enemyAtlas map, roughness 0.85, vertexColors:true |
+| eyeGlow | Standard emissive #b7c95a intensity 1.5 |
+| cactus, shrub, deadTree, tumbleweed | alphaTest 0.5, DoubleSide |
+Environment: captureEnvironment(G) renders a CubeCamera(0.1, 200, WebGLCubeRenderTarget(128)) at (0, 1.6, 0) after town, props and lighting fixtures exist, runs PMREMGenerator.fromCubemap, sets scene.environment and scene.environmentIntensity = ENV.intensity. Once, never per frame.
+### 3.3 Town geometry (town.js + buildings.js) — build notes per element
+* Street: BoxGeometry 120 × 0.30 × 12 at y = −0.15; top face MAT.sand (UVs in metres → 4 m repeat), wagon ruts as recessed strips, dry puddles as recessed 0.4 × 0.25 strips; sides MAT.adobe blackened. Vertex colours: darken to 0.6 within 0.4 m of buildings/barricades.
+* Boardwalks: 120 × 0.15 × 2 planes at y 0.005 on both sides, MAT.boardwalk, sagging (vertex y offset), gaps.
+* Building lots: 120 × 0.15 × 6 planes at y 0.005, MAT.sand, between buildings.
+* Saloon (x −6, z −11, 14 × 10 × 8.5): two-story, warped plank walls (woodPlank), saloonRed trim, swinging doors (two hinged leaves), balcony (roof anchor), piano, bottles, hand-painted SALOON sign, sagging porch.
+* Livery (x 8, z 11, 16 × 10 × 7): open gates, hayloft (roof anchor), horse stalls, hay bales, ladder, LIVERY STABLE sign.
+* Church (x 22, z 11, 10 × 12 × 9): whitewash (churchWhite), bell tower (roof anchor), simple cross, small graveyard with wooden crosses.
+* Sheriff (x 56, z −11, 14 × 10 × 6.5): reinforced (rust trim), iron bars on jail cells, 2 jail cells, wanted posters, SHERIFF sign.
+* Generic houses ×6: warped planks, sagging porches, hand-painted signs.
+* Barricades: overturned wagon (x −40, +34), barrels (x −24, +48), crates (x +10).
+* Surroundings: cacti, dry shrubs, dead trees, tumbleweeds, distant mesas, sky.
+* AO strips: 0.35 m gradient planes along every wall/floor and wall/ceiling junction, under porches, around barricades.
+### 3.4 Static colliders registered by town.js (all MASK.SOLID unless stated)
+| tag | shape | surface | mask | notes |
+|---|---|---|---|---|
+| floor | box y ∈ [−0.3, 0], street rect | sand | BULLET | |
+| boardwalk | boxes | wood | BULLET | |
+| building-<name> | boxes per building | wood/adobe | SOLID | player/enemies cannot walk through |
+| barricade-<n> | boxes | wood | SOLID | |
+| porch-<n> | boxes | wood | SOLID | |
+| jail-bar | boxes | metal | BULLET | bullets hit bars |
+| cell-door | box | metal | SOLID | |
+| cactus/shrub/tree | cyl | wood | SOLID | |
+### 3.5 Props (props.js) — counts and construction
+| Prop | Count / placement | Construction |
+|---|---|---|
+| Barricade (overturned wagon) | 2 | wagon body, wheels, spilled barrels |
+| Barricade (barrels) | 2 | 3–4 stacked barrels |
+| Barricade (crates) | 1 | stacked crates |
+| Cactus | 8 | saguaro, instanced |
+| Dry shrub | 12 | instanced |
+| Dead tree | 4 | instanced |
+| Tumbleweed | 6 | rolling, scripted |
+| Dry puddle | 6 | recessed, MAT.puddle |
+| Wagon ruts | 4 | recessed strips |
+| Sign | 3 | SALOON, SHERIFF, LIVERY STABLE |
+| Wanted poster | 4 | on Sheriff walls |
+| Hay bale | 6 | Livery |
+| Horse stall | 4 | Livery |
+| Piano | 1 | Saloon |
+| Bottles | 12 | Saloon bar |
+| Wooden cross | 6 | graveyard |
+### 3.6 Lighting (lighting.js)
+3.6.1 Global: renderer.toneMapping = ACESFilmic, exposure POST.exposure. scene.background = FOG.color, scene.fog = FogExp2(FOG). HemisphereLight(LIGHTS.hemi). Environment §3.2.
+3.6.2 The 12 lights (created in init, kept forever):
+| # | Light | Position / colour / intensity | Role |
+|---|---|---|---|
+| 1 | HemisphereLight | sky #b8c4d8 / ground #6a4a2a / 0.35 | ambient fill |
+| 2–7 | PointLight ×6 | LIGHTS.street (x −50 … 50 step 12, y 4.0, z 0), #ffe2b8, 20 cd, dist 12 | key light; pools alternate along the street |
+| 8 | PointLight | saloon (−6, 4.0, −11), #ffc878, 25 cd, dist 14 | warm saloon glow |
+| 9–10 | PointLight ×2 | sheriff (56, 4.0, −11) + (56, 4.0, −9), #ffe2b8, 22 cd, dist 14 | sheriff forecourt |
+| 11 | PointLight | muzzle, #ffb050, dist 10, decay 2, intensity 0 at rest | muzzle flash |
+| 12 | PointLight | jail interior (56, 2.5, −11), #ffe2b8, 15 cd, dist 8 | jail cell light |
+Calibration: with the reference view of screenshot #1, post.sampleLuminance() should read 0.28–0.40; adjust LIGHTS.street.intensity (not exposure) if outside.
+3.6.3 Street lamps: globe sphere r 0.07 emissive #fff1d0 × 3 + glow quad 0.6 m α 0.4 (batch 0). 2 % breathing at 0.7 Hz.
+3.6.4 Other emitters: glow batches (≤ 3 InstancedMesh billboard batches); light shafts (truncated cones, additive gradient, fresnel fade); dust motes.
+3.6.5 Muzzle / spark light: flashMuzzle(pos, intensity): intensity per WEAPONS[id].flashLight for ticks 1–2, linear to 0 at tick 4, distance 10.
+### 3.7 Weapon viewmodels (viewmodels.js) — geometry
+All primitives, merged per moving group, materials from §3.2. Local frame: gun points −Z, +Y up, +X right; group attached to player.viewRoot (child of camera). Rest poses in camera space; scale 0.9.
+| Weapon | Parts (bold move) | Muzzle / eject port (local) | Rest pos / rot | Sprint pos |
+|---|---|---|---|---|
+| Revolver | frame 0.03 × 0.035 × 0.19; cylinder 0.05 × 0.05 × 0.06 (rotates); hammer; trigger guard; grip with checkering; barrel stub r 0.006; front sight | (0, 0.02, −0.11) / (0.012, 0.03, −0.02) | (0.17, −0.15, −0.30) / (0, 0.04, 0) | rest + (−0.03, −0.05, 0.02), pitch −0.2, roll +0.15 |
+| Rifle | receiver 0.25 × 0.07 × 0.06; barrel r 0.009 len 0.30; lever (moves on reload); stock gunWood; magazine tube; front/rear sights | (0, 0.045, −0.48) / (0.02, 0.04, −0.10) | (0.13, −0.14, −0.34) / (0, 0.04, 0) | as revolver |
+| Shotgun | receiver 0.2 × 0.055 × 0.045; two barrels r 0.012 len 0.5; break lever (moves); fore-end ribbed; stock gunWood; brass bead | (0, 0.04, −0.62) / (0.02, 0.03, −0.15) | (0.12, −0.15, −0.38) / (0, 0.05, 0) | as revolver |
+Hands: palm box + 5 capsule fingers, skinHands; handR fixed to the grip, handL a separate group that reloads animate. Lowered pose: rest + (0, −0.25, 0), pitch −35°. All parts renderOrder 10, frustumCulled = false, depthTest true, layers.set(LAYERS.VIEWMODEL). Wall-push pose owned by player.js: each tick one colliders.raycast(eye, forward, VIEWMODEL.wallPushDist, MASK.BULLET); with k = 1 − dist/1.2 the viewmodel is pulled toward rest + (0, −0.18·k, +0.10·k) and pitched −25°·k.
+### 3.8 Post-processing (post.js)
+Chain §2.15. GradeShader (write inline): uniforms tDiffuse, resolution, time, hurt, lowHealth, dead, vignette 0.45, grain 0.06, ca 0.0018, saturation 0.92. Same recipe as Fable §3.8 (CA, lift/gamma/gain, saturation, lowHealth desaturation, dead grey, hurt red, grain, vignette).
+### 3.9 Visual priorities
+MUST-HAVE (Tier 1): street + boardwalks + lots; all 10+ buildings with the mandatory set (Saloon with swinging doors + balcony, Livery with open gates + hayloft, Church with bell tower + graveyard, Sheriff with 2 jail cells); barricades (overturned wagon, barrels, crates); cacti/shrubs/dead trees/tumbleweeds; distant mesas + sky; texture recipes (woodPlank 2 seeds, adobe, sand, boardwalk, rust, saloonRed, churchWhite, hay, signs, wanted posters); vertex AO + AO strips + blob shadows; puddles with env reflection; PMREM capture; street lamps + saloon glow + sheriff lights + muzzle light; signage; post chain with grade; enemies (3 anchors, all animation states, eye glow, blood puffs + decals, blob shadows); weapons (3 viewmodels with moving parts, flash, tracers, casings, recoil/sway/bob, reload/break/switch animations); dust motes; impact sparks/dust; bullet holes.
+SHOULD-HAVE [T2]: second-seed variants + per-bay tints; sticker atlas + flyers; saloon piano + bottles; hay bales + horse stalls; wooden crosses; sign sway; tumbleweed rolling; ADS; ammo drops; damage arcs; decals of all surfaces.
+NICE-TO-HAVE [T3]: Appendix B.
+---
+## 4. GAMEPLAY SPEC
+Pillars in priority order: (1) gun feel — every shot produces a tracer, a flash that lights the porch, a camera kick, a viewmodel kick, a casing, a sound, an impact in wood/dust; (2) readable enemies — window lights up, roof silhouette moves, barricade shakes; (3) the town is the show-piece — pushing down Main Street feels like a western movie; (4) push to the jail — curated escalation, last 20 m before the Sheriff's office are the climax.
+### 4.1 Player controller (player.js)
+4.1.1 Look: mouse deltas × PLAYER.mouseSens. pitch clamped ±PLAYER.maxPitch. Final camera rotation = base + recoil + bob/roll + shake. FOV 75 (sprint 80 over 0.2 s). Attract mode on the start screen (real-time only): yaw drifts ±10° at 0.05 Hz.
+4.1.2 Movement: walk/sprint 4.2/6.6 m/s (sprint needs input.move.y > 0.3); backpedal & pure strafe factor 0.85; accel 40 m/s², friction vel *= exp(−12·dt); capsule r 0.35, height 1.8; step height 0.35; no gravity/jump/crouch in Tier 1. Desired velocity = normalize(move.x·right + move.y·forward) · speed. Sprinting: FOV up, bob up, viewmodel to sprint pose, cannot fire.
+4.1.3 Collision (each tick, after integration): 1. y = floorHeightAt(x, z); if null → revert (try X-only / Z-only moves). 2. colliders.resolveCircle(pos, 0.35, MASK.PLAYER, pos.y). 3. Enemies within 2 m → push player 30 %, enemy 70 %. 4. Ensure floorHeightAt still non-null.
+4.1.4 Head bob, roll, viewmodel sway: bobPhase += 2π·f·dt while moving (f = 1.9 Hz walk, 2.6 sprint); vertical A_v·|sin φ| (0.035/0.05), lateral A_l·sin(φ/2) (0.02/0.03), roll 0.6°·strafe + 0.35°·sin(φ/2) sprinting. Footstep on each zero crossing. Viewmodel sway: swayYaw += (−dx·0.0006 − swayYaw)·min(1, 12dt) clamped ±0.06 rad; breathing y += 0.002·sin(2π·0.3·t); walk x += 0.006·sin(φ/2), y −= 0.004·|sin φ|.
+4.1.5 Health: max 100; regen 5 HP/s after 6 s without damage; low-health ≤ 30 (G.lowHealth = clamp((30 − h)/30)).
+### 4.2 Weapons (weapons.js)
+4.2.1 Stat table (authoritative copy in constants.WEAPONS):
+| Stat | Revolver | Rifle (Winchester) | Shotgun |
+|---|---|---|---|
+| Mode | semi (press per shot; 80 ms click buffer) | lever (press per shot) | break: 0.12 s shot + 0.80 s break |
+| Damage / pellet | 40 | 30 | 15 × 9 pellets |
+| Headshot mult | 3.0 | 2.5 | 1.5 |
+| Limb mult | 0.75 | 0.75 | 0.75 |
+| RPM | 240 (250 ms) | 120 (500 ms) | 40 |
+| Mag / start reserve / max reserve | 6 / 24 / 36 | 8 / 32 / 48 | 2 / 12 / 20 |
+| Base spread | 0.6° | 0.8° | aim 0.8° + fixed pellet pattern |
+| Moving spread add | +0.8° | +0.7° | +0.6° |
+| Bloom / shot, max, recovery | +0.4°, 2.5°, 5°/s after 80 ms | +0.3°, 3.0°, 6°/s after 60 ms | +1.2°, 3.0°, 4°/s after 150 ms |
+| Range full / min factor | 18 m / 0.7 @ 40 m | 25 m / 0.6 @ 50 m | 6 m / 0.25 @ 18 m |
+| Camera kick pitch / yaw | 1.6° × rng(0.9,1.15) / rng(−0.4,0.4) | 1.3° × rng(0.9,1.1) / rng(−0.3,0.3) | 4.0° × rng(0.95,1.1) / rng(−0.8,0.8) + roll |
+| Kick ramp / recovery | 50 / 160 ms | 40 / 130 ms | 60 / 260 ms |
+| Viewmodel kick back / up | 0.05 m / 3.0° | 0.04 m / 2.0° | 0.09 m / 5° |
+| Reload tactical / empty | 2.2 / 2.6 s (transfer at 70 %) | 2.4 / 2.8 s (transfer at 70 %) | start 0.35 + 0.55/shell + end 0.40 |
+| Switch lower / raise | 0.22 / 0.28 | 0.28 / 0.32 | 0.30 / 0.38 |
+| Tracer | 1 (r 0.012, 0.9 m) | 1 | 9 thin (r 0.006, 0.5 m) |
+| Casing | brass 44 on shot | brass 44 on shot | red 12 ga hull on the break stroke |
+| Muzzle flash scale / light | 0.35 m / 8 cd | 0.45 m / 10 cd | 0.7 m / 18 cd |
+TTK vs a 60 HP window shooter: revolver 2 body / 1 head; rifle 2 body / 1 head; shotgun ≤ 6 m one shot if ≥ 8 pellets land.
+4.2.2 State machine: ready | firing | breaking | reloading | lowering | raising | holstered.
+* ready → firing when trigger (semi: fireJustPressed, or buffered ≤ 80 ms) && mag > 0 && cooldown ≤ 0 && canFire. Fires this tick, cooldown = 60/rpm; back to ready next tick (revolver/rifle) or breaking for 0.80 s (shotgun; hull ejected at 0.25 s).
+* Trigger on empty → weapon-empty (dryFire, rate-limited 4/s) and auto-reload after 0.25 s if reserve > 0.
+* ready|breaking → reloading on R when mag < magSize && reserve > 0. Revolver/rifle: at 70 % of duration n = min(magSize − mag, reserve) transfers. Shotgun: start → shell loop → end. Firing, switching or sprinting cancels after the current shell.
+* any → lowering (t_lower) → raising (t_raise) → ready on switch. index/current/getState().weapon flip to the target on the tick the switch is requested.
+* Sprint keeps ready but canFire = false.
+4.2.3 Firing a shot: origin = eye; baseDir = camera forward INCLUDING recoil offsets. For i in pellets: dir = perturb(baseDir, spreadDeg [+ patternOffset(i) rotated by a random per-shot angle for the shotgun]); hit = trace(origin, dir, BALLISTICS.maxDist); tracer from muzzleWorld (+ forward·0.15) to hit.point unless dist < 1.5 m; enemy hit → enemies.applyDamage; world hit → emit shot-hit-world. mag−−; bloom += bloomDeg; recoil kick; viewmodel kick; particles.muzzleFlash; lighting.flashMuzzle; particles.ejectCasing; emit shot-fired; stats.shotsFired++; hud.onShot(). spreadDeg = base + moveAdd·clamp(|vel|/walkSpeed, 0, 1.4) + bloom. Shotgun pattern: pellet 0 on axis, pellets 1–3 at 1.6°, pellets 4–8 at 2.3°, rotated by one random per-shot angle, jittered inside a 0.3° disc. Guarantee: pattern-only cone ≤ 2.6° → 0.159 m at 3.5 m; pattern + aim spread ≤ 3.4° → 0.178 m at 3.0 m, inside the 0.20 m chest capsule → all 9 pellets hit a standing target at ≤ 3.0 m regardless of seed.
+4.2.4 Reload / break / switch timelines (poses in viewmodels.js; sfx cue times):
+* Revolver (t ∈ [0,1] of 2.2 s / 2.6 s empty): 0–0.20 roll left 25°, pitch down 10°, move (−0.02, −0.03, +0.02), off-hand to the cylinder (reloadStart at 0.02); 0.20–0.30 cylinder swings out (cylinderOut at 0.22); 0.30–0.75 off-hand dips out and returns with fresh rounds; 0.75–0.85 rounds insert (roundsIn at 0.83; transfer at 0.70); 0.85–1.0 cylinder swings back, return. Empty: 0.85–0.92 hammer pulled back, 0.92–0.97 snaps forward (hammerRack at 0.95).
+* Rifle (2.4 / 2.8 s): tilt right 20°; lever down + rounds out 0.15–0.30; hand away/back 0.30–0.70; rounds rock in 0.70–0.85 (roundsIn 0.82; transfer at 0.70); tap 0.85–0.90; return. Empty: lever back 0.05 then release (leverRack) 0.90–0.97.
+* Shotgun: start (0.35 s) roll right 30° so the port faces the camera; each shell (0.55 s): shell mesh from below to the port (0–0.35), push in (0.35–0.45, shellInsert, ammo +1 at 0.33 s), hand retreats; end (0.40 s): roll back, breakShort if the reload started with mag == 0.
+* Break (0.80 s): barrels break open (0.10–0.30, breakOpen 0.12, hull at 0.25), hold (0.30–0.45), close (0.45–0.65, breakClose 0.55); the gun dips 0.01 and rolls 3°.
+* Switch: lowering = translate (0, −0.25, 0) + pitch −35° ease-in over lower; raising = reverse with ease-out-back 1.2.
+4.2.5 Camera recoil: on a shot, target.pitch += kickPitch; target.yaw += kickYaw; target.roll += kickRoll. Applied offset moves toward the target over the ramp time. Recovery starts RECOIL.holdTime after the last shot: target *= exp(−dt/τ), τ = recovery/3. While the player pulls the mouse down during recovery, consume the pull from target.pitch first.
+4.2.6 Viewmodel kick springs: vel.pos.z += kickBack·k1; vel.rot.x += kickUp·k2; vel.rot.z += rng(−1,1)·kickUp·0.3; vel.pos.x += rng(−1,1)·kickBack·0.25; acc = −K·offset − D·vel with RECOIL.vmSpringK/D.
+### 4.3 Ballistics and hit feedback
+trace(origin, dir, maxDist): world = colliders.raycast(origin, dir, maxDist, MASK.BULLET); enemy = enemies.raycast(origin, dir, world ? world.dist : maxDist, _enemyHit); return the nearer. No penetration; corpses not hittable. Enemy raycast: bounding sphere at the pelvis then the 17 capsules, head first, nearest wins. Cost target < 0.05 ms with 24 enemies.
+Damage: dmg = weapon.damage × mult(group) × falloff(dist), mult(head) = min(weapon.headMult, def.headMultCap), torso 1.0, arm/leg 0.75; falloff = 1 up to fullRange, lerp to minFactor at minRange. enemies.applyDamage returns {killed, headshot, staggered}.
+Feedback: HUD hit marker (white body / yellow head / red + 30 % larger on kill; shotgun one marker per shot by best outcome), hitMarker sounds, enemy flinch, blood burst, crosshair contracts 15 % for 100 ms. No damage numbers, no health bars.
+Stats (G.stats): shotsFired, shotsHit, headshots, kills, killsByType, damageDealt, damageTaken, sectorsCleared, timeSurvived; accuracy = shotsHit/shotsFired.
+### 4.4 Effects (particles.js + decals.js) — all pooled, zero runtime allocation
+4.4.1 Muzzle flash: three additive planes at the muzzle (cross of two 0.35 × 0.35 perpendicular quads + a 0.25 forward-facing disc), muzzleFlash atlas variant random, random roll, scale flashScale × rng(0.8, 1.2), lifetime 55 ms, depthTest false, renderOrder 20. Rifle adds 2 side cards (40 ms). Plus the muzzle light, 1 smoke puff (shotgun 3), every 4th rifle shot and every shotgun shot 2–3 embers.
+4.4.2 Tracers: InstancedMesh(96) of a unit cylinder along +Z, MAT.tracer, instanceColor brightness ×2.5. Spawn from S = muzzle world (+ forward·0.15) to E = hit point (or 120 m); skip if dist < 1.5 m. Speed 280 m/s; total time clamped [35, 110] ms. Per tick head = min(dist, v·age), tail = max(0, head − len); place from S + dir·tail to S + dir·head. Shotgun: 9 instances of radius 0.006, len 0.5. frustumCulled = false.
+4.4.3 Casings: InstancedMesh(64) cylinders: 44 r 0.0045 × 0.019, 12 ga hull r 0.0095 × 0.06 red. Gravity 9.81; on y ≤ floorHeightAt + r: vy × −0.35, vxz × 0.7, ω × 0.5; casingBounce on the first two bounces within 6 m; rest after 3 bounces or |v| < 0.15; life 8 s then shrink 0.3 s.
+4.4.4 Impacts (by surface) — particles.impact(pos, normal, surface, weapon); decals & audio listen to shot-hit-world:
+| Surface | Particles | Puff | Decal | Sound |
+|---|---|---|---|---|
+| wood | 5–8 tan splinters 0.5 s | light brown puff | hole 0.05 | impactWood |
+| adobe | 6–10 grey chips 0.01 m | dust 2 sprites | dark chip 0.06 | impactAdobe |
+| sand | 6–10 dust chips | dust 2 sprites | dust mark 0.06 | impactSand |
+| metal | 10–16 additive sparks | tiny grey puff | scratch 0.04 | impactMetal (20 % ricochet) |
+| glass | 8 white-cyan shards | none | crack star 0.12 | impactGlass |
+| none (edge) | nothing | | | |
+4.4.5 Blood: burst 8–14 particles (0.006–0.014 m, colour (0.35, 0.02, 0.02)) along the reflected dir ±60° at 1.5–4 m/s, gravity, 0.5 s + 2 mist sprites. Headshot kills: 24 particles + 4 mist upward. Floor splat decal under the hit. Death pool: decals listens to enemy-rest and adds the pool FX.poolDelay later; grows 0.2 → 1.2 m over 3 s. Keep blood dark (#4a0a0a).
+4.4.6 Effects budget: worst case (shotgun on metal at 3 m): 3 flash planes + 1 light + 3 smoke + 9 tracers + 1 hull + 9 × 12 sparks + 9 decals — all pooled. Effects draw calls ≤ 10.
+### 4.5 Enemies — archetypes, anchored AI (enemies.js)
+4.5.1 Archetypes (authoritative in constants.ENEMY_TYPES):
+| | Window Shooter | Roof Sniper | Barricade Shotgunner |
+|---|---|---|---|
+| Silhouette | 1.75 m, leans out of a window frame, bandana | 1.75 m, crouched on a roof/balcony/hayloft/tower, rifle | 1.8 m, hunched behind a barricade, shotgun |
+| HP | 60 | 80 | 100 |
+| Radius | 0.35 | 0.35 | 0.40 |
+| Anchor | window | roof | barricade |
+| Points | 1 | 2 | 3 |
+| Vocal pitch | 0.9–1.1 | 1.1–1.3 | 0.7–0.9 |
+| Fire range | 45 m | 45 m | 25 m (shotgun) |
+| Damage | 8–12 | 10–14 | 12–16 (shotgun spread) |
+| Fire accuracy | 0.5–2.0° | 0.5–1.5° | 1.0–3.0° |
+Per-instance at spawn (G.rng): height scale 0.94–1.06, tint ±10 % L, phase offset, vocal timer.
+4.5.2 State machine (anchored):
+```
+inactive → idle (at anchor, hidden behind cover) → peek (lean out) → aim → fire → duck → reload → peek …
+→ dead (fall) → corpse → sinking → inactive
+```
+* idle: hidden behind cover (window: inside the frame; roof: prone; barricade: crouched behind). Not hittable.
+* peek: lean out over peekTime (window: rise into the frame; roof: raise head; barricade: rise above the barricade). Becomes hittable. Emits enemy-peek.
+* aim: track the player, aimTime, then fire.
+* fire: one shot (or shotgun blast), fireTime 0.1 s. Emits shot-fired (enemy variant).
+* duck: drop back behind cover over duckTime. Not hittable.
+* reload: after a magazine of shots, reloadTime, then peek again.
+* dead: emit enemy-killed, death animation, removed from steering/collision; corpse 9 s then sinks → inactive.
+* Targeting: only the player; enemies always know where the player is (no perception model).
+* LOD: beyond ENEMY.lodDistance animate every 2nd tick; behind the camera skip animation.
+* Vocals: per-enemy timer rng.range(3, 9) s → enemy-vocal when within 25 m; growl at aim; hurt grunt rate-limited 0.25 s; death vocal; global cap 6 voices.
+4.5.3 Anchored behaviour: enemies never move from their anchor (no NavMesh). They lean out, shoot, duck. The barricade shakes when the shotgunner fires (visual). Window lights up when a window shooter peeks (emissive flash). Roof silhouette moves (animation).
+### 4.6 Mission director and the push (mission.js + prisoner.js)
+4.6.1 States: idle → intro (2.0 s banner) → active (sector 1) → sectorClear (3.0 s banner) → active (sector 2) → … → showdown (Saloon Showdown, midpoint set-piece) → finalPush → win | lose.
+Sector progression: sector 1 (TOWN ENTRANCE, x −60…−40), sector 2 (MAIN STREET, x −40…−6), sector 3 (SALOON SHOWDOWN, x −6…10), sector 4 (FINAL PUSH, x 10…56). A sector clears when its queue is empty and aliveCount === 0. Sector 3 is the Saloon Showdown: the Saloon's window shooters + balcony sniper activate together, a set-piece with a banner. Sector 4 is the final push: Sheriff's barricade shotgunners + window shooters, the last 20 m before the Sheriff's office are the climax.
+4.6.2 Spawn queue: each sector builds queue = [{type, anchorId}] of config.count entries (constrained shuffle, G.rng). Spawns held while aliveCount ≥ maxAlive. Enemy population per §1.13 ENEMY_POP.
+4.6.3 Win/lose: Win when the prisoner is freed (prisoner-freed). Lose when the player dies (player-death) or the prisoner dies (prisoner-death). game-over / game-win events.
+4.6.4 Prisoner: state locked/free/dead. Key on the Sheriff's desk (or dropped by the last barricade shotgunner). F on key → keyHeld; F on cell door → unlock; F on prisoner → free ⇒ Win. Shooting the lock also unlocks. Prisoner death (enemy fire) ⇒ Lose.
+4.6.5 Score/kills: kills counts bodies (HUD). score = Σ points × (headshot ? 2 : 1).
+### 4.7 Player damage, death, game over, restart
+* applyDamage: health −= amount (god mode skips), lastDamage = 0, player-hit (HUD vignette flash, directional arc, playerHurt sfx rate-limited 0.2 s), camera shake 0.5° for 0.2 s, knockback vel += normalize(pos − from)·knockback, viewmodel jolt 0.02 m down. health ≤ 30: heartbeat loop, master low-pass 0.35 duck, grade desaturation.
+* Death (health ≤ 0): dead = true, player-death {reason}; camera pitch → −35°, eye → 0.45 m over 0.8 s, roll → 20°, viewmodel drops out; world keeps simulating 1.5 s then freezes; HUD fades; after 1.5 s #gameover shows "YOU DIED" + stats; pointer lock released; gameOver sfx.
+* Restart (R / click / Enter / __game.restart()): full soft reset (§2.3) → intro(1). RNG not reseeded unless seed() is called.
+---
+## 5. HUMANOID RIG AND ANIMATION (rig.js / enemies.js)
+One SkinnedMesh per enemy (one draw call), procedurally built skeleton, rigid binding, animation = bone rotations computed per tick by layered clip functions. No physics engine; deaths are kinematic.
+5.1 Bone hierarchy (21 THREE.Bone, bone-local offsets in metres at scale 1; depth-first order = BONE_NAMES): root (Group: pos = enemy.pos, rotation.y = yaw, scale = def.scale × bodyScale; local forward = −Z) → pelvis (0, 0.96·legScale, 0) → spine (0, 0.14, 0) → chest (0, 0.20, 0) → neck (0, 0.26, 0) → head (0, 0.10, 0); shoulders → upperArmL/R → lowerArmL/R → handL/R; hips → upperLegL/R → lowerLegL/R → footL/R. Same as Fable §5.1.
+5.2 Parts (17, rigidly bound; partId attribute; atlas quadrant UV remap): pelvis, spine, chest, neck, head, upperArmL/R, lowerArmL/R, handL/R, upperLegL/R, lowerLegL/R, footL/R. Extras merged: bandana (window), hat (roof), shotgun strap (barricade). ~2.6–3.2 k tris total.
+5.3 Hit capsules (bone-local a, b, r; world via bone.matrixWorld): same table as Fable §5.3. PART_GROUP: head, neck → head; chest, spine, pelvis → torso; arms/hands → arm; legs/feet → leg. Capsule world data refreshed once per tick inside enemies.update(), after the pose is applied, into enemy.capsules (Float32Array 17 × 7) — never in render(). hitVolumeCenter(enemy, 'torso') = the world midpoint of the chest capsule; 'head' = the head capsule midpoint. Test order: head first, then torso, then limbs; nearest hit wins.
+5.4 Textures per variant (textures.js enemyAtlas): skin generator (512²), cloth, face (front quadrant), bandana/hat/strap. Same recipe as Fable §5.4.
+5.5 Animation layers: pose buffer Float32Array(21 × 3) Euler XYZ per bone + extras. Final pose = weighted blend of active clips, then flinch spring, then applyPose. Clips: idle (breathing, weight shift), peek (rise into the frame), aim (track the player, rifle raised), fire (recoil), duck (drop behind cover), reload (lever/cylinder/break motion), flinch (additive spring), death (kinematic fall), corpse (still). speedRatio = 0 (anchored — no locomotion).
+5.6 Death (kinematic): pick back if the killing hit came from the front and was strong; forward if killed while speedRatio > 0.5; else crumple. Same recipe as Fable §5.6. After landing: ENEMY.restTwitchTime = 0.4 s of small twitches then still → emit enemy-rest. Headshot kills: head part scaled to 0 + big burst [T2]. bodyThud when the body lands. Sink: rootY → −ENEMY.sinkDepth over sinkTime, then release.
+5.7 Blob shadows: particles.setBlob(enemy.blobIndex, pos, 0.45·scale, alpha); alpha 0.5 alive, fades with the sink. Player uses blob index 0.
+---
+## 6. THE PUSH (mission.js) — choreography
+The push is the mission director's timeline. Sector 1 (entrance): 2 window shooters in the first houses + 1 barricade shotgunner at the overturned wagon. Sector 2 (main street): 2 window shooters + 1 roof sniper (a house roof). Sector 3 (Saloon Showdown): the Saloon's 4 window shooters + 1 balcony sniper activate together — a set-piece with a banner, the piano, bottles. Sector 4 (final push): Sheriff's 2 barricade shotgunners + 2 window shooters; the last 20 m before the Sheriff's office are the climax. After sector 4 clears, the player enters the Sheriff's office, finds the key, unlocks the cell, frees the prisoner → Win.
+---
+## 7. AUDIO (audio.js) — everything synthesized with WebAudio at init; no files
+7.1 Graph: voices → sfxBus (Gain 1.0) → duckFilter (BiquadFilter lowpass, 20 kHz) → master (Gain 0.8) → compressor → destination; sfxBus → reverbSend (Gain 0.25) → convolver → reverbReturn; loops → ambBus (Gain 0.7); ui → uiBus (Gain 0.6) → master. Impulse response: procedural stereo 2.2 s, noise · e^(−3.2t) with a one-pole low-pass sweeping 7 kHz → 900 Hz + 6 early reflections — "wooden hall", RT60 ≈ 1.6 s, pre-delay 15 ms. Noise buffers (white, pink, brown; 2 s, looped) pre-generated. AudioContext created only in unlock() (latencyHint:'interactive'); disable() never creates one; headless starts disabled unless __game.enableAudio(). Voices: play() builds a small node graph, cap 32 voices in flight (LRU-steal), per-name rate limit 25 ms. Positional (opts.pos): one of 24 pooled PannerNodes. Priority when starved: weapon > player hurt > enemy fire > impacts > steps > groans. Audio never affects state; may use Math.random() for micro-jitter.
+7.2 Recipes (RECIPES[name] = (ctx, dest, opts) => Voice):
+| name | recipe |
+|---|---|
+| revolverShot | white → BPF 1.8 kHz Q 0.8, env 1.0 → 0.001 over 0.13 s; + sine 180 → 55 Hz sweep 0.09 s gain 0.7; + 2 ms square click 3 kHz. Reverb 0.45. rate ±4 % |
+| rifleShot | white → BPF 1.3 kHz Q 0.9, 0.10 s; + saw 220 → 70 Hz 0.06 s through LPF 1.5 kHz; + sine 140 → 45 Hz 0.1 s. Gain 0.85; rate ±5 % |
+| shotgunShot | brown → LPF 900 Hz 0.28 s + white → BPF 2.5 kHz 0.05 s + sine 110 → 35 Hz 0.18 s; mechanical clack 40 ms later. Gain 1.0, reverb 0.55 |
+| dryFire | white → HPF 3 kHz 6 ms + triangle 1.1 kHz 12 ms, gain 0.35 |
+| reloadStart, cylinderOut, roundsIn, hammerRack, leverRack, shellInsert, breakOpen, breakClose, breakShort | filtered noise clicks 20–60 ms with resonant peaks 600 Hz–2.5 kHz |
+| holster, drawRevolver, drawRifle, drawShotgun | pink → BPF 1 kHz 120 ms gain 0.2 + metallic tap |
+| casingBounce / hullBounce | 2 decaying sines 2–6 kHz "tink" / LP noise 30 ms dull; positional |
+| footstep (L/R pan), footstepWood | pink → LPF 300–600 Hz 45 ms gain 0.25; wood adds a 900 Hz ring |
+| enemyStepLight, enemyStepHeavy | brown → LPF 250 Hz 60 ms gain 0.18; heavy + 50 Hz thump |
+| whoop (window) | saw + square detuned, f0 200–300 Hz, vibrato, LPF sweeping; positional |
+| holler (roof) | as whoop at 1.2× pitch, brighter LPF |
+| growl (barricade) | whoop sub-octave through a waveshaper, tremolo 3 Hz |
+| hurtGrunt, deathMoan, bodyThud | short grunt / moan gliding −30 % over 0.8 s + bodyThud at +0.7 s |
+| hitFlesh, headshot, hitMarker, killMarker | brown → LPF 350 Hz 70 ms 0.6 + sine 95 Hz 50 ms + white → BPF 1.2 kHz 15 ms; headshot + HPF 2.5 kHz crack; markers: 2 sine ticks 1.8 kHz |
+| impactWood, impactAdobe, impactSand, impactMetal, impactGlass, ricochet | white → BPF 2.8 → 1.1 kHz sweep 60 ms + LP tail 90 ms 0.35; wood = LP thock; metal = sines 1.7/2.3/3.1 kHz; glass = HPF 4 kHz + sines 4–7 kHz; ricochet = metal + sweep |
+| playerHurt | brown → LPF 500 Hz 120 ms 0.7 + sine 55 Hz 0.25 s + saw 220 → 110 Hz 0.15 s |
+| heartbeat (loop) | sine 50 Hz double-thump per beat, rate 70 → 110 bpm by health |
+| keyPickup, cellUnlock, prisonerFree | latch click + rummage / 2 sines 880/1320 Hz / rising sines C4 E4 G4 |
+| sectorSting, sectorClear, showdownSting, gameOver, gameWin | saw A1 + E2 → LPF 500 → 2 kHz 1.4 s / 3 rising sines / saw 110 → 55 Hz 2.5 s / rising fanfare |
+| ambience (loop) | 120 Hz sine 0.05 + pink → LPF 380 Hz 0.05 (wind) + slow-LFO brown (desert wind) + random tumbleweed rustle |
+| doorCreak, gateClang | saw 180 → 120 Hz 0.4 s LPF 900 Hz 0.15; metal clang |
+7.3 Bus subscriptions (inside audio.js): shot-fired → WEAPONS[weapon].sfx; weapon-empty → dryFire; weapon-reload-start → per-weapon cue schedule; weapon-switch → holster + draw; shot-hit-world → impact by surface; enemy-hit → hitFlesh/headshot + hitMarker; enemy-killed → deathMoan + bodyThud; enemy-vocal → whoop/holler/growl by type; enemy-peek → whoop; enemy-duck → growl; player-hit → playerHurt; player-footstep → footstep; player-death/game-over → gameOver + stop loops + LPF 600 Hz; game-win → gameWin; game-start → ambience loop; sector-enter → sectorSting; sector-clear → sectorClear; showdown-start → showdownSting; key-pickup → keyPickup; cell-unlocked → cellUnlock; prisoner-freed → prisonerFree; light-flicker → buzzTick.
+---
+## 8. HUD (hud.js + index.html + style.css)
+HTML/CSS only, no canvas UI, no web fonts (system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; numbers in "Courier New", "DejaVu Sans Mono", monospace). All elements exist statically in index.html (ids below); hud.js queries them once in init() and per tick touches textContent, style.transform, style.opacity and classes — numeric text only when it changes, ≤ 20 property writes per tick when idle.
+8.1 index.html DOM (ids used by hud.js — exact):
+```html
+<canvas id="c"></canvas>
+<div id="hud">
+<div id="crosshair"><span class="ch-bar ch-t"></span><span class="ch-bar ch-b"></span><span class="ch-bar ch-l"></span><span class="ch-bar ch-r"></span><span id="ch-dot"></span></div>
+<div id="hitmarker"><span></span><span></span><span></span><span></span></div>
+<div id="sprint-glyph" class="hidden">»</div>
+<div id="prompt"></div>
+<div id="banner"><div id="banner-text"></div><div id="banner-sub"></div></div>
+<div id="sector-box"><div id="sector-label">SECTOR 1</div><div id="sector-sub"></div></div>
+<div id="kills-box"><span id="kills-icon">☠</span><span id="kills-num">0</span></div>
+<div id="health-box"><div id="health-bar"><div id="health-ghost"></div><div id="health-fill"></div></div><div id="health-num">100</div></div>
+<div id="ammo-box"><div id="ammo-name">COLT PEACEMAKER</div><div id="ammo-line"><span id="ammo-mag">6</span><span id="ammo-sep">/</span><span id="ammo-reserve">24</span></div>
+<div id="reload-bar"><div id="reload-fill"></div></div><div id="ammo-pips"></div><div id="reload-label" class="hidden">RELOAD</div></div>
+<div id="prisoner-box"><div id="prisoner-label">PRISONER: LOCKED</div></div>
+<div id="damage-arcs"></div>
+<div id="vignette"></div>
+<div id="toast"></div>
+<div id="fps" class="hidden">60</div>
+</div>
+<div id="overlay">
+<div id="start" class="screen"><h1>DUSTWOOD GULCH</h1><p class="sub">HIGH NOON</p><p id="start-hint">CLICK TO ENTER</p>
+<ul id="controls"><li>WASD move · Shift sprint</li><li>Mouse aim · LMB fire · R reload</li><li>1 / 2 / 3 weapons · wheel cycle · F interact</li></ul></div>
+<div id="pause" class="screen hidden"><h2>PAUSED</h2><p>click to resume</p></div>
+<div id="gameover" class="screen hidden"><h1 id="go-title">YOU DIED</h1><p id="go-reason"></p><table id="go-stats"></table><p id="go-hint">PRESS R OR CLICK TO RESTART</p></div>
+<div id="win" class="screen hidden"><h1>PRISONER FREED</h1><p id="win-sub"></p><table id="win-stats"></table><p id="win-hint">PRESS R OR CLICK TO RESTART</p></div>
+</div>
+```
+style.css: full-window canvas; #hud absolute, pointer-events:none; #overlay pointer-events:auto; .hidden { display:none !important }; .screen centred flex column with a dark translucent backdrop; #banner black-enamel sign style; classes .hit .head .kill on #hitmarker; .pulse; .low (amber) / .empty (red) on #ammo-mag; .arc elements inside #damage-arcs; .pip/.pip.off in #ammo-pips; keyframes hitpop, killpop, bannerin, bannerout, toastin.
+8.2 Elements and behaviour:
+* Crosshair: 4 bars 2 × 9 px + centre dot, white with a dark outline; gap px = 6 + tan(spreadDeg°)·(viewportH/2)/tan(fov/2); contracts 15 % for 100 ms on hit; hidden in sprint (#sprint-glyph shows instead).
+* Hit marker: 4 diagonal 10 px bars; hitMarker('hit'|'head'|'kill') toggles the class → CSS animation scale 1.3 → 1, opacity 1 → 0 (120 ms; kill 200 ms, 30 % larger, red; head yellow).
+* Ammo (bottom right): mag 42 px bold, reserve 22 px, weapon name small caps; .low at ≤ 30 % mag, .empty + pulsing RELOAD at 0; during reload the digits are replaced by #reload-bar progress; pips = one bar per round (max 8).
+* Health (bottom left): 220 × 14 px bar, white → amber (≤ 50) → red (≤ 30), numeric; #health-ghost shrinks over 0.6 s after damage.
+* Sector / kills: #sector-label "SECTOR 3 — SALOON SHOWDOWN"; #sector-sub "3 LEFT" (active) / "SECTOR CLEARED" (pulsing); #kills-num pops on increment.
+* Prisoner: #prisoner-label "PRISONER: LOCKED" / "KEY HELD" / "CELL UNLOCKED" / "PRISONER FREED".
+* Banner: banner(text, sub, seconds) — fade in 0.2 s, hold, fade out 0.4 s. Used for "SECTOR n", "SECTOR n CLEARED", "SALOON SHOWDOWN", "FINAL PUSH", "PRISONER FREED".
+* Prompt (60 px below centre): "F — TAKE KEY", "F — UNLOCK CELL", "F — FREE PRISONER", "RELOAD" (pulsing when mag 0 and not reloading); prompt(null) hides.
+* Damage arcs: up to 6 concurrent 120 × 12 px red gradient wedges on a 140 px circle, rotated to the attacker's bearing; life 1.2 s with 0.4 s fade.
+* Vignette: #vignette radial gradient rgba(120,0,0,α); persistent α = lerp(0.15, 0.45, lowHealth) pulsing +0.12 per heartbeat when health ≤ 30; damage flash 0.55 → 0 over 0.5 s adds on top. Also calls post.setHurt(flash), post.setLowHealth(lowHealth), post.setDead(dead).
+* Screens: #start (title, hint, controls; attract-mode camera drift behind), #pause, #gameover (title "YOU DIED", stats table: sector reached, kills by type, headshots, accuracy, damage dealt, time survived, shots fired, score; restart hint), #win (title "PRISONER FREED", stats table, restart hint).
+* FPS #fps when ?debug=1 or __game.showFps(true). setHidden(true) hides #hud entirely (screenshots).
+* Toast: #toast small text for debug-message (2 s). Nothing is projected from 3-D except the damage arcs (bearing only). No enemy health bars, no floating text, no minimap.
+---
+## 9. DEBUG API — window.__game (debug.js)
+Installed by boot() before asset generation; ready flips to true after the warm-up render. Every call is synchronous and returns JSON-able data. Angles radians, positions [x, y, z]. Calls that need a started game throw Error('game not started'). Startup detection: opts.headless is true when ?headless=1 or navigator.webdriver === true (Playwright) unless ?headless=0 — headless implies pixel ratio 1, low quality unless ?post=1, no pointer lock, audio disabled by default, manual stepping on start().
+9.1 Lifecycle:
+| Member | Behaviour |
+|---|---|
+| ready: boolean, version: '1.0.0', errors: string[], nullSystems: string[] | errors mirrors window.onerror, unhandled rejections, console.error, exceptions inside stepOnce; nullSystems must be empty for every test |
+| disableAudio() / enableAudio() | disable: no AudioContext ever created; getState().audio === 'disabled'. Call before start(). |
+| seed(n) | reseeds G.rng (gameplay). Textures/placement keep the build seed. |
+| start(opts?) | starts from the start screen without pointer lock; opts.manual defaults to true. Idempotent. Enters intro(1). |
+| restart() | full soft reset (§2.3): G.time/G.frame return to 0, event ring cleared, so setTime(3) after restart() fast-forwards 3 s of the new game; getState().mode === 'playing', sector === 1, sectorState === 'intro'. |
+| pause() / resume() | toggle G.paused (real-time mode). |
+| setManualStepping(bool) | true: sim advances only via step/setTime; false: real-time RAF. |
+| step(dt = 1/60, n = 1) -> State | run n ticks of dt (clamped [1/240, 0.1]) then render once. |
+| setTime(t) -> State | fast-forward: tick at 1/60 without rendering until G.time ≥ t (no-op if t ≤ time; ≤ 36 000 ticks per call), then render once. |
+| fastForward(seconds) -> State | setTime(time + seconds). |
+| renderOnce() | render without ticking. |
+9.2 Input injection (persistent until changed):
+| Call | Behaviour |
+|---|---|
+| setLook(yaw, pitch) | player.setLook: sets base yaw/pitch and syncs the camera/eye at once. yaw 0 → −Z; −π/2 → +X (Sheriff's office); +π/2 → −X (entrance); π → +Z. |
+| look(dYaw, dPitch) | relative look (obeys recoil-consumption). |
+| lookAt(x, y, z) / aimAt(x, y, z) | base yaw/pitch so the eye ray hits the point. |
+| aimAtEnemy(id, group = 'torso') -> boolean | aimAt on the enemy's hitVolumeCenter; 'head' or 'torso'; false if not hittable. |
+| move(dir) | World-space XZ direction vector: {x, z}, {x, y, z}, [x, z], [x, y, z], or two numbers move(dx, dz); magnitude clamped to 1; move(null)/move(0, 0) stops. Persists; re-projected onto the player's current heading every tick. move(1, 0) walks toward +X (the Sheriff's office). |
+| moveWorld(dx, dz) | alias of move. |
+| moveLocal(strafe, forward) | player-local: strafe +1 = right, forward +1 = the camera's forward; magnitude clamped to 1. |
+| setSprint(bool) | held key. |
+| fire() -> boolean | press-and-release this tick; buffered 80 ms; returns true if a shot fired synchronously. |
+| setTrigger(bool) | hold/release. |
+| reload() -> boolean | R; true if a reload started. |
+| switchWeapon(n) -> string \| null | 1-based: 1 revolver, 2 rifle, 3 shotgun. |
+| interact() | F. |
+| teleport(x, z, yaw?, pitch?) | player.teleport: feet at (x, floorHeightAt(x,z), z) (nearest walkable if null), velocity zeroed, camera/eye synced immediately. |
+9.3 Game manipulation:
+| Call | Behaviour |
+|---|---|
+| killAllEnemies() -> number | kills every alive enemy (weapon:'debug', no headshot) and empties the spawn queue so the sector clears on the next tick. |
+| killEnemy(id) | kills one. |
+| spawnEnemy(type, x, z, opts?) -> id | 'window'\|'roof'\|'barricade'; opts {anchorId?, state?, hp?}. |
+| skipToSector(n) -> State | Works from any state (intro/active/sectorClear/showdown/finalPush/gameover): from gameover it first calls restart(); then kills every enemy silently, clears the queue, sets sector = n synchronously (getState().sector === n on return) and enters intro (n = 1) or active (n ≥ 2). |
+| skipShowdown() | jumps to the Saloon Showdown. |
+| setGodMode(bool) / setInfiniteAmmo(bool) | as named. |
+| setEnemySpeedScale(k) / setEnemyAI(bool) | global speed multiplier / false freezes all enemies in idle. |
+| setHealth(h) | clamps 0–100; 0 triggers death. |
+| giveAmmo() | refills reserves. |
+| unlockCell() | unlocks the cell (debug). |
+| winGame() | frees the prisoner and triggers the win state. |
+| setQuality('low'\|'high') | post quality. |
+| hideHud(bool) / showFps(bool) | screenshot helpers. |
+| screenshotHint() | teleports to (−24, 0.4), setLook(−π/2, −0.05), hides nothing; returns the checklist entry #1. |
+| setTuning(path, value) / getTuning() | e.g. ('WEAPONS.rifle.damage', 30) writes into the live constants objects. |
+9.4 State inspection:
+```js
+getState() -> {
+mode: 'menu'|'playing'|'gameover'|'win', started, paused, manual, audio: 'enabled'|'disabled',
+time, frame, fps, renders, stepMs, renderMs,
+sector, sectorState: 'idle'|'intro'|'active'|'sectorClear'|'showdown'|'finalPush'|'win'|'lose',
+enemiesAlive, enemiesQueued, enemiesTotalThisSector, enemiesSpawned, corpses,
+playerHealth, playerPos: [x,y,z], playerYaw, playerPitch, playerAlive,
+weapon: 'revolver'|'rifle'|'shotgun', weaponState, ammo: { mag, reserve }, ammoAll,
+spread, recoil: [pitch, yaw],
+prisoner: 'locked'|'free'|'dead', keyHeld, cellUnlocked,
+gameOver, gameOverReason: null|'killed'|'prisoner', kills, score, lowHealth,
+drawCalls, errors: number
+}
+getEnemies() -> [{ id, type, variant, state, hp, maxHp, pos:[x,y,z], yaw, headPos:[x,y,z], distToPlayer, alive, anchorId }]
+getEnemy(id) -> entry | null
+getStats() -> G.stats + accuracy
+getEvents(since = 0) -> { next, events: [{ i, t, type, data }] }
+getRenderInfo() / getPerf() -> { calls, triangles, points, lines, geometries, textures, canvasTextures, textureMB, programs, lights, fps, stepMs, renderMs, renders, initMs }
+getInitTimings() -> { total, textures:{name:ms}, aoBake, envCapture, compile }
+getPools() -> { tracers:{live,cap}, casings, particles, smoke, decals:{holes,splats,pools}, enemies:{alive,corpses,free}, voices }
+getLevelInfo() -> { bounds, playerSpawn, anchors:[...], sectors, buildings:[...], api:{...} }
+floorHeightAt(x, z) -> number|null
+navDistanceAt(x, z) -> number|-1
+sampleLuminance() -> number
+G // raw context for ad-hoc inspection
+```
+Determinism guarantee: with disableAudio(), seed(n), manual stepping and only step/setTime, two runs with the same API sequence produce identical getState(), getEnemies() (positions to 1e-6) and getEvents() types/times. Rendering need not be pixel-deterministic.
+---
+## 10. TEST HARNESS AND SCREENSHOT CHECKLIST
+10.1 test/harness.js (exists — do not modify without the integrator): withGame(async (page, api) => {…}, { url:'/index.html', query:'?seed=7', viewport:{width,height} }) serves the repo root on a free port, launches SwiftShader Chromium (--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader --ignore-gpu-blocklist --autoplay-policy=no-user-gesture-required), collects errors[]/logs[], exposes api.game(method, ...args), api.state(), api.step(n = 60, dt = 1/60), api.waitReady(timeout = 60000), api.shot(name). Because Playwright sets navigator.webdriver, the game auto-detects headless (§9).
+10.2 test/smoke.js (Agent-MISSION) — node test/smoke.js; exit 1 on any failed check; writes test/shots/results.json. Checks, in order:
+1. boot: ready within 90 s; getState().mode === 'menu'; errors.length === 0.
+2. start: disableAudio(); seed(7); start() → mode 'playing', sector 1, sectorState ∈ {intro, active}, manual === true, getState().renders ≥ 1 and fps > 0.
+3. sector1: setTime(8) → enemiesAlive ≥ 1; setTime(22) → enemiesAlive ≥ 3, all window/barricade, distToPlayer decreasing over two 2 s samples for every enemy in peek/aim. shot('01-sector1'). 3b. nav: navDistanceAt(56, −11) > 0 (Sheriff), navDistanceAt(−6, −11) > 0 (Saloon), navDistanceAt(8, 11) > 0 (Livery), navDistanceAt(22, 11) > 0 (Church); floorHeightAt(0, 0) === 0, floorHeightAt(0, 7) === 0 (boardwalk), floorHeightAt(0, 15) === null.
+4. shoot: teleport(0, 0, π/2) (face −X); id = spawnEnemy('window', −6, 0, {state:'peek'}); aimAtEnemy(id,'torso'); fire() → true; the newest enemy-hit event has enemyId === id; expected group === 'torso' and getEnemy(id).hp === 20 (60 − 40); ammo.mag === 5; events contain shot-fired; getPools().tracers.live === 1 after one step. Then fastForward(0.25) (revolver cooldown 250 ms) and fire(); step(1/60) → shot('02-firing') (second torso hit: hp ≤ 0, mag === 4).
+5. headshot: spawnEnemy('roof', 8, 11, {state:'peek'}); aimAtEnemy(id,'head'); fastForward(0.25); fire() → hp ≤ 0 (40 × 3 = 120 ≥ 80), an enemy-killed {headshot:true} event, kills ≥ 1.
+6. rifle: switchWeapon(2) returns 'rifle'; step() → weapon === 'rifle', weaponState ∈ {lowering, raising}; fastForward(0.7) → 'ready'; setTrigger(true); fastForward(0.5) → rifle mag decreased by 1 (rpm 120 = 500 ms); recoil[0] > 0 while firing; setTrigger(false); fastForward(0.6) → recoil[0] < 0.002. Also switchWeapon(0) === null (1-based API).
+7. shotgun: switchWeapon(3); fastForward(0.8); id2 = spawnEnemy('barricade', −3, 0, {state:'peek'}) (3.0 m); aimAtEnemy(id2,'torso'); fire() → hp ≤ 0 (9 × 15 = 135 ≥ 100: all 9 pellets by the §4.2.3 guarantee at 3.0 m), weaponState === 'breaking', mag === 1, tracers live = 9 on the next step.
+8. reload: switchWeapon(1); fastForward(0.7) → revolver mag === 4, reserve === 24; reload() true, weaponState 'reloading', fastForward(2.5) → mag === 6, reserve === 22 (general form: reserve === 24 − (6 − m0)).
+9. damage/death/restart: spawnEnemy('window', px + 1.0, pz); fastForward(3) → playerHealth < 100 + a player-hit event; setHealth(5); fastForward(6) → gameOver, mode 'gameover'; shot('08-gameover'); restart() → mode 'playing', playerHealth 100, sector 1, time === 0, getEvents().events.length === 0 or only game-restart/sector-intro.
+10. sector clear → showdown (continues from restart(); setGodMode(true) first): setTime(3) → sectorState 'active'; killAllEnemies(); step() → sectorState 'sectorClear'; fastForward(3.5) → sector 2 active; killAllEnemies(); step() → sector 2 clear; fastForward(3.5) → sector 3 (showdown) active; shot('03-showdown'); killAllEnemies(); step() → sector 3 clear; fastForward(3.5) → sector 4 (final push) active; shot('04-final-push'); killAllEnemies(); step() → sector 4 clear.
+11. prisoner/win: teleport(56, −11); interact() (take key) → keyHeld true; interact() (unlock cell) → cellUnlocked true; interact() (free prisoner) → mode 'win', prisoner 'free'; shot('05-win'). Then restart() and verify the win screen clears.
+12. determinism: restart(); seed(7) then checks 3–4 again → identical getEnemies() positions (1e-6) and getEvents() types/times to the first run.
+13. errors: errors.length === 0 && getState().errors === 0.
+14. perf sanity: getPerf() → calls ≤ 400, triangles ≤ 1.5e6, lights ≤ 12, programs ≤ 64, stepMs ≤ 8, initMs ≤ 20000, sampleLuminance() > 0.02 on every shot.
+15. beauty (--post): reload with ?post=1&seed=7, viewport 1280×720, start(); setTime(40); shot('09-beauty').
+10.3 test/shots.js (Agent-LIGHT) — node test/shots.js; the reviewer's screenshot checklist → test/shots/S1..S9.png at 1920×1080 with ?post=1. Setup per shot: disableAudio(); seed(1337); start(); setTime(12), then teleport(x, z); setLook(yaw, pitch); step(1/60, 3); capture.
+| # | Name | teleport (x, z) | setLook (yaw, pitch) | State | Must be visible | Judge |
+|---|---|---|---|---|---|---|
+| S1 | Street vista | (−24, 0.4) | (−1.5708, −0.05) | sector 1 idle | full street receding to the Sheriff's office; both boardwalks; street lamps; signs; barricades; a puddle reflection; fog dimming the far end | depth and rhythm; alternating light pools; repetition broken; bloom restrained |
+| S2 | Saloon detail | (−6, −4) | (0, −0.08) | sector 3 | Saloon: swinging doors, balcony, SALOON sign, piano, bottles, warped planks, hard porch shadow | material fidelity at 3–5 m; normals readable; no blur |
+| S3 | Showdown | (−6, 0) | (−1.5708, −0.02) | sector 3 active | window shooters leaning out, balcony sniper, muzzle flash, tracers, blood puffs, bullet holes | drama and readability |
+| S4 | Final push | (34, 0) | (−1.5708, −0.05) | sector 4 active | Sheriff's office ahead, barricade shotgunners, wanted posters, iron bars | escalation; climax readable |
+| S5 | Jail | (56, −4) | (0, −0.05) | sector 4 clear | jail cells, iron bars, prisoner, key on the desk | vertical variety; warm jail light |
+| S6 | Combat close-up | (−6, 0) | (−1.5708, −0.02) | sector 3 | revolver viewmodel with muzzle flash, a tracer in flight, an enemy mid-flinch with a blood puff, blood splats + bullet holes, casings in the air, muzzle light, HUD legible | weapon detail, flash quality, tracer readable, blood dark |
+| S7 | Church (bonus) | (22, 4) | (0, 0) | any | whitewash, bell tower, cross, graveyard with wooden crosses | |
+| S8 | Livery (bonus) | (8, 4) | (0, 0) | any | open gates, hayloft, hay bales, horse stalls, ladder | |
+| S9 | Death (bonus) | — | — | — | setHealth(1), spawn a window shooter adjacent, step until gameOver, +1.5 s | tilted low camera, grey grade, game-over screen |
+Global checks on every shot: no z-fighting, no visible wall seams, no unlit black walls facing the camera, fog colour = background, sampleLuminance() > 0.02, getRenderInfo().calls ≤ 400.
+10.4 test/perf.js (Agent-MISSION) — node test/perf.js: ?seed=3&post=1; start(); setInfiniteAmmo(true); setGodMode(true); loop fastForward(5) until enemiesAlive ≥ 20 (≤ 180 s, using skipToSector if needed); step(1/60, 5); getPerf() → assert calls ≤ BUDGET.drawCalls, triangles ≤ BUDGET.triangles, lights ≤ 12, programs ≤ BUDGET.programs, textures ≤ BUDGET.textures, canvasTextures ≤ BUDGET.canvasTextures, textureMB ≤ BUDGET.gpuMB, stepMs ≤ 8, initMs ≤ BUDGET.initMsHeadless; programs unchanged between samples (no mid-game shader recompiles); pools: after killAllEnemies() and fastForward(15) all effect pools report live 0 (no leaks). Exit 1 on violations; prints JSON.
+---
+## 11. INTEGRATION ORDER
+1. Hour zero (Integrator): constants.js (verbatim §1.13), bus.js, utils.js, collision.js, index.html, style.css, main.js booting with NullSystem stand-ins + a flat-lit placeholder floor, debug.js with ready/errors/getState/step/setTime/start/pause/render, input.js, hud.js skeleton. Post "hour zero ready".
+2. Look milestone (TEX → TOWN → LIGHT): textures.js + materials.js (dev/textures.html), town.js (dev/town.html with colliders), buildings.js, props.js, lighting.js + post.js. Gate: ?viewer=1 fly-through looks like the paragraph in §3; ≤ 130 draw calls without enemies; no seams at street/boardwalk joins; planks read as planks at 2 m; fixtures visibly emissive with restrained bloom; sampleLuminance() calibrated.
+3. Walk milestone (PLAYER + Integrator): player.js on the real colliders; walk the whole street, onto the boardwalks, around buildings and barricades, without snagging; bob/sprint FOV work. Gate: resolveCircle never tunnels at sprint speed.
+4. Shoot milestone (PLAYER + LIGHT + TEX + AUDIO): weapons.js + viewmodels.js, particles.js, decals.js, audio.js. Fire all three weapons at every surface type: tracers, flash + light, casings, decals, sparks/dust, sounds, recoil, reload/break/switch animations. Gate: smoke checks 4–8 pass with spawnEnemy stubbed to a capsule.
+5. Enemy milestone (ENEMY + MISSION-nav): rig.js, enemies.js, nav.js. spawnEnemy('window', −6, 0) peeks from the window and shoots; head/limb multipliers; deaths and corpses. Gate: 24 alive + 10 corpses at 60 fps on the dev GPU; enemies.raycast matches the visuals.
+6. Loop milestone (MISSION + PRISONER): mission.js, prisoner.js. Sector 1 → clear → sector 2 → … → Saloon Showdown → final push → Sheriff's office → key → unlock cell → free prisoner → Win → restart. Gate: node test/smoke.js passes end to end.
+7. Polish: node test/perf.js, node test/shots.js review against §10.3, grime/litter/poster/flicker/fog/exposure tuning, difficulty tuning, Tier-2 items in §3.9 order.
+Merge procedure per milestone: the integrator wires the real module into main.js (replacing the NullSystem), runs the applicable tests, and files any signature drift back to the owner. Never fix another agent's module silently.
+---
+## 12. DEFINITION OF DONE (all boxes ticked; mapped to the user's requirements)
+"Beautifully detailed 3D western town … impressive"
+* test/shots.js S1–S6 each scored ≥ 3 by a reviewer on every must-have item; S1 shows alternating light pools, puddle reflections, fog.
+* Every Tier-1 item in §3.9 present: street + boardwalks, all 10+ buildings with the mandatory set, barricades, cacti/shrubs/dead trees/tumbleweeds, distant mesas + sky, signs, wanted posters, puddles, dust motes.
+* All textures procedural (canvas), normal + roughness maps on hero surfaces; env reflections visible on puddles and metal.
+* Post chain live: bloom (restrained), SMAA, grade (vignette, grain, CA, hurt, low-health desaturation, death grey).
+"FPS with cowboy enemies, 3 anchors"
+* Three anchors (window/roof/barricade) with distinct silhouettes, one SkinnedMesh per enemy, procedural peek/aim/fire/duck/reload/flinch/death animations, eye glow, blob shadows.
+* Enemies bound to cover anchors, lean out, shoot, duck; window lights up, roof silhouette moves, barricade shakes.
+* Headshot/torso/limb multipliers verified by smoke checks 4–5; corpses persist then sink; pool never leaks.
+"Visible ammo tracers, weapon recoil, ≥ 2 weapons, muzzle flash, sfx"
+* Revolver, rifle, shotgun all usable; every shot spawns a visible tracer (shotgun 9), a muzzle flash sprite and a light that visibly lights the nearest porch, a casing, a smoke puff, an impact (particles + decal), and a synthesized sound.
+* Camera recoil kicks and recovers; the viewmodel kicks with springs; reload/break/switch animations with sound cues; dry-fire + auto-reload.
+* Audio: every cue in §7.3 produces a sound with sound on; reverb audible; positional whoops pan; disableAudio() creates no AudioContext.
+"Mission: entrance → sectors → Saloon Showdown → jail → free prisoner → Win"
+* Sector 1 (entrance) → sector 2 (main street) → sector 3 (Saloon Showdown, midpoint set-piece) → sector 4 (final push) → Sheriff's office → key → unlock cell → free prisoner → Win screen → Restart without reloading the page.
+* Prisoner death or player death ⇒ Lose.
+"three.js, playable in the browser"
+* node serve.js 8080 → http://localhost:8080/ boots with the importmap only; click → pointer lock → play with keyboard/mouse; pause on lock loss.
+* No external URLs (grep -rn "http" src index.html style.css shows only comments); no asset files (find . -name "*.png" -o -name "*.jpg" -o -name "*.glb" -o -name "*.mp3" -o -name "*.wav" -o -name "*.ttf" outside test/shots and node_modules returns nothing).
+* 60 fps at 1080p on a GTX 1660-class GPU with 24 enemies alive and bloom on; node test/perf.js passes (calls ≤ 400, tris ≤ 1.5 M, lights ≤ 12, programs ≤ 64, textures ≤ 220, no program-count change across a sector cycle); headless boot ≤ 20 s.
+"window.__game debug API / headless tests"
+* Every member of §9 exists with the stated semantics, including the user's minimum: start, setLook, move, fire, reload, switchWeapon, killAllEnemies, skipToSector, getState → {sector, enemiesAlive, playerHealth, ammo, weapon, prisoner, gameOver, fps}, setTime, step, disableAudio.
+* node test/smoke.js passes with 0 errors; all screenshots non-black; determinism check 12 passes.
+* test/harness.js unchanged and sufficient to drive the game.
+Engineering hygiene
+* No Math.random/performance.now/Date.now/setTimeout/setInterval/requestAnimationFrame in systems (grep), except main/audio/hud as allowed.
+* No system imports another system module (grep -n "from './" src/*.js shows only constants/bus/utils/collision/textures/materials and the two owner-only helpers).
+* Every system implements init/update/reset/dispose (+ render where specified); ?dispose-test=1 disposes and rebuilds without errors.
+* renderer.shadowMap.enabled === false; no castShadow; static groups matrixAutoUpdate = false; no per-tick allocations in hot paths.
+* Total lines ≤ 11 k for Tier 1 + tests (wc -l src/*.js index.html style.css test/*.js); ≤ 12.5 k after the gated T2 items.
+---
+## Appendix A — numeric sanity (verified against §1.13)
+* Street 120 m long, 12 m wide; boardwalks 2 m wide each side; lots 6 m deep each side.
+* Player spawn (−58, 0, 0) facing +X; Sheriff's office at x = 56, 114 m down the street.
+* Saloon at x = −6 (midpoint of the street); Livery at x = 8; Church at x = 22; Sheriff at x = 56.
+* Barricades at x = −40, −24, +10, +34, +48 — the last 20 m before the Sheriff's office (x 36…56) are the climax.
+* Enemy counts: sector 1 = 3, sector 2 = 3, sector 3 (showdown) = 5, sector 4 = 4; pool 24.
+* TTK on a 60 HP window shooter: revolver 2 body / 1 head (120); rifle 2 body / 1 head (90); shotgun ≤ 3.0 m 9 × 15 = 135 with all pellets inside the torso.
+* Lights: 1 hemi + 6 street + 1 saloon + 2 sheriff + 1 muzzle + 1 jail = 12.
+* Draw calls at sector 4: town 90 + props 60 + enemies 48 + blob 1 + effects 10 + viewmodel 6 + glow batches 3 + post 5 ≈ 223 ≤ 400.
+* Textures: ≈ 80 named entries × 1–3 maps ≈ 140 registry GPU textures + composer/bloom + SMAA + PMREM/cube + luminance ≈ 160 ≤ 220.
+* Fog: visibility factor exp(−(0.02·d)²): 30 m → 0.70, 60 m → 0.28, 100 m → 0.02; the Sheriff's office at 114 m is dimmed but readable.
+* Timeline sanity for smoke check 10: restart() → time 0; setTime(3) = intro over (2 s) + 1 s active; sector-1 first spawn at 2 + 2 = 4 s, so killAllEnemies() at 3 s kills nobody but empties the queue → cleared on the next tick.
+## Appendix B — Tier-3 list (one line each; not planned, budgeted or started before the §0.2 gate)
+Reflector hero puddle · GTAO half-res pass · RectArea saloon lights (would break the 12-light rule) · swinging saloon sign · rats (instanced, scripted paths) · cobwebs (alpha planes in porch corners) · carved bench initials · hopscotch chalk · limb gibs on shotgun kills · Line2 tracers · puddle ripples from drips · weapon flashlight (13th light — same review) · horse in the livery · tumbleweed physics · "HIT BY WAGON" game over.
+
+> Michael Knopke <knopkem@gmail.com mailto:knopkem@gmail.com> hat am 16.09.2026 10:12 CEST geschrieben:
+>
+>
+> # Ashworth St — Build Brief (plan-mode input)
+>
+> ## How to use this brief
+> This is a product and constraints brief, not a specification. You will plan
+> and implement the whole thing yourself, autonomously, in a single
+> unattended pass: there is no follow-up review, no second prompt, and no one
+> to answer questions. Make every decision yourself, document assumptions
+> inline where the brief is ambiguous, prefer the simplest solution you are
+> confident you can execute correctly, and keep going until the game is
+> complete and its tests pass. Where your plan improves on details here, do
+> so — but respect the hard constraints and the quality bar.
+>
+> ## The game
+> A first-person shooter set in a single, beautifully detailed underground
+> subway station. The player is trapped on an island platform between two
+> tracks when an outbreak reaches the station. They fight waves of the undead
+> until they die; there is no win state. Progression is driven by trains:
+> after a quiet first wave, a train pulls in, opens its doors, and unloads
+> the next wave. Later waves arrive the same way, escalating in number,
+> toughness and speed. The only goal is to survive as long as possible.
+>
+> ## What must be true when it's done
+> - A beautifully detailed, impressive 3D station — the look and feel is a
+> primary deliverable, not a backdrop.
+> - First-person shooting against humanoid/zombieoid enemies.
+> - At least two usable weapons (a pistol and a rifle are expected; a shotgun
+> is a bonus), each with visible tracers, weapon recoil, muzzle flash and
+> synthesized sound.
+> - Wave structure: a simple first wave, then a train arrival that opens its
+> doors and releases wave two, then rising difficulty until the player loses.
+> - Plays in a browser with mouse + keyboard.
+> - Fully headless-testable and scriptable.
+>
+> ## Creative direction
+> Early-20th-century two-track station. An island platform with tiled walls
+> across both tracks carrying a green mosaic band with the station name; two
+> rows of riveted cast-iron columns in institutional green; a low ceiling
+> crowded with pipes, cable trays and humming fluorescent troffers — some
+> dead, some stuttering; puddles reflecting the tubes on a stained floor;
+> tunnels dissolving into blue-black with amber sodium lamps and signal
+> lights. Palette: fluorescent green-white against warm brown grime, sodium
+> amber, ice-white headlights, red emergency strobes. The station must never
+> look flat-lit — alternating pools of light are its identity. Lean into
+> grime, wear, litter and lived-in detail.
+>
+> ## Gameplay pillars (priority order)
+> 1. Gun feel — every shot produces a tracer, a flash that lights the scene,
+> camera kick, weapon kick, a shell casing, a synthesized sound and an impact
+> on the world.
+> 2. Readable enemies — a few clearly distinguishable silhouettes and
+> behaviours, legible at distance.
+> 3. The train is the show-piece — its arrival should be a scripted,
+> cinematic, dramatic set piece.
+> 4. Escalation until death — no win state; difficulty keeps climbing.
+>
+> ## Hard tech constraints
+> - Engine: three.js **r185**, vendored locally — do not upgrade it, do not
+> use a CDN and do not let the version float. Load it as ES modules through
+> an import map; addons come from the local `three/addons/` folder. The game
+> depends on these addons: the post-processing chain (`EffectComposer`,
+> `RenderPass`, `UnrealBloomPass`, `OutputPass`, `SMAAPass`, `ShaderPass`),
+> `BufferGeometryUtils` (geometry merging) and `SimplexNoise` (pre-baked
+> noise tiles). Dev-only pages may additionally use `OrbitControls`.
+> - Pure vanilla JavaScript, ES2022 modules, named exports. No bundler, no
+> TypeScript, no UI framework. Node **22** static file server.
+> - Runs from a plain static file server with no build step.
+> - No external asset files and no network requests of any kind: textures
+> generated procedurally at runtime (canvas), geometry built in code, all
+> sound synthesized with the Web Audio API.
+> - Tested with Playwright against headless Chromium (SwiftShader WebGL2).
+>
+> ## Engineering guidelines
+> - Determinism above all: a fixed-timestep simulation fully decoupled from
+> rendering, seeded RNG for both world-building and gameplay, and no
+> wall-clock time, `Math.random`, timers or frame-callback calls inside game
+> systems. Same seed plus same input sequence must reproduce identical state
+> — this is what makes the headless tests trustworthy.
+> - A debug/control API exposed on the page is the single test surface:
+> start/restart/pause, deterministic stepping and fast-forward, input
+> injection (look, move, fire, reload, switch weapon, interact, teleport),
+> world manipulation (spawn/kill enemies, skip to a wave, call the train),
+> and JSON-serialisable state inspection (wave, enemies alive, health, ammo,
+> weapon, train state, game over, performance). All heavy logic must be
+> driveable and observable through it.
+> - Systems stay decoupled: each owns one area and communicates through a
+> shared context object and a lightweight event bus rather than importing one
+> another. Hot paths allocate nothing; reusable objects are pooled. Expensive
+> resources are created once at init, never per frame.
+> - Keep rendering costs disciplined: prefer instancing/merging, a fixed and
+> modest real-light budget (no shadow maps), and post-processing used with
+> restraint. Target smooth 60 fps at 1080p with the scene busy.
+> - Keep the whole game reviewable and moddable in a small codebase. Document
+> assumptions where the brief is ambiguous and pick the simplest reading.
+>
+> ## Single-pass execution
+> There is exactly one pass: plan and build the complete game now. Do not
+> stage the work as "core first, polish later" and do not reserve any feature
+> for a follow-up — nothing will be added after this session. Because there
+> is no second chance, bias every choice toward what you can implement
+> correctly the first time: prefer well-understood, procedural, table-driven
+> techniques over exotic ones, keep the architecture coherent, and aim for
+> the full vision without ever sacrificing a complete, working build for
+> scattered half-features. Verify as you go by actually running the headless
+> tests and fixing what fails rather than assuming it passes. The session is
+> only done when the entire game — station, weapons, enemies, waves, train
+> sequence, audio, HUD, debug API and tests — is finished and working.
+>
+> ## Quality bar / done
+> - The station is visually convincing and the light pools read clearly;
+> screenshots look deliberate.
+> - The weapon systems feel distinct; every shot carries tracer, flash,
+> casing, sound and impact.
+> - Enemies navigate the platform and stair/mezzanine, path around obstacles,
+> and die convincingly.
+> - The full loop runs: wave 1 → clear → train arrives, doors open, wave 2 →
+> escalating waves → death → restart without reloading the page.
+> - Tests pass headlessly, the debug API behaves as documented, and no
+> external assets or network calls exist.
+>

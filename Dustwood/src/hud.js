@@ -59,9 +59,11 @@ export class Hud {
     on('cell-unlocked', () => this._updatePrisoner());
     on('prisoner-freed', () => this._updatePrisoner());
 
-    // click-to-restart on game over / win
+    // click-to-enter / resume / restart on the overlay screens
     this.G.overlayRoot.addEventListener('click', () => {
       if (this.G.gameOver) this.G.hooks.restart();
+      else if (this.G.started && this.G.paused) this.G.paused = false;
+      else if (!this.G.started) this.G.hooks.start();
     });
   }
 

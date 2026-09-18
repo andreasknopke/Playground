@@ -103,6 +103,11 @@ export const ENEMY = {
   sinkTime: 1.5, sinkDepth: 2.2, hitFlashTime: 0.08, boundingR: 1.6, lodDistance: 45,
   peekTime: [0.8, 1.4], aimTime: [0.5, 0.9], fireTime: 0.1, duckTime: [0.9, 1.6], reloadTime: [1.5, 2.5],
   fireRange: 45, fireAccuracyDeg: [0.5, 2.0], damage: [8, 14], vocalEvery: [3, 9], maxVoices: 6,
+  turnRate: 6, // rad/s: how fast an engaged enemy rotates to face the player
+  // Metres the corpse root lowers as it falls so it rests on the ground instead
+  // of hovering at hip height. Per death mode, because each tips the body a
+  // different amount around the pelvis (measured so the lowest joint rests ~0.05).
+  deathDrop: { back: 0.54, crumple: 0.16, forward: 0.65 },
 };
 // ---- Mission ----
 export const MISSION = { introTime: 2.0, sectorClearTime: 3.0, showdownIntro: 2.0 };

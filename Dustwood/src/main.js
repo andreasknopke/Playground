@@ -178,6 +178,7 @@ export async function boot() {
 
   // Resize + start RAF.
   setupResize(G);
+  setupEnterKey(G);
   G._lastMs = performance.now();
   G._raf = requestAnimationFrame((now) => frame(G, now));
 
@@ -299,6 +300,18 @@ function setupResize(G) {
   window.addEventListener('resize', onResize);
   onResize();
   G._onResize = onResize;
+}
+
+// Enter key mirrors the overlay click: start, resume, or restart. The overlay
+// only listens for clicks, so without this the "CLICK TO ENTER" screen would
+// ignore Enter even though the on-screen hint implies a key can start the game.
+function setupEnterKey(G) {
+  window.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== 'NumpadEnter') return;
+    if (G.gameOver) G.hooks.restart();
+    else if (G.started && G.paused) G.paused = false;
+    else if (!G.started) G.hooks.start();
+  });
 }
 
 // ---- Error capture ----

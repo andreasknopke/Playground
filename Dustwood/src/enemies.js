@@ -4,7 +4,7 @@ import * as THREE from 'three';
 import { MAT } from './materials.js';
 import { ENEMY, ENEMY_TYPES, LAYERS } from './constants.js';
 import { MASK } from './collision.js';
-import { clamp, degToRad, rayCapsule, raySphere, TMP } from './utils.js';
+import { clamp, degToRad, wrapAngle, rayCapsule, raySphere, TMP } from './utils.js';
 import {
   buildRig, makePose, applyPose, refreshCapsules, clipIdle, clipPeek, clipAim,
   clipFire, clipDuck, clipReload, clipFlinch, clipDeath, PART_NAMES, PART_GROUP,
@@ -30,6 +30,34 @@ function buildEnemyGun() {
   add(new THREE.BoxGeometry(0.045, 0.14, 0.05), gm, 0, -0.06, 0.03, 0.35); // grip
   add(new THREE.CylinderGeometry(0.02, 0.02, 0.06, 8), br, 0, 0.0, 0.12, Math.PI / 2); // cylinder
   add(new THREE.BoxGeometry(0.02, 0.03, 0.02), gm, 0, 0.06, 0.26); // front sight
+  // The barrel is modelled along +z. The gun is parented to the right_hand bone,
+  // whose world orientation changes with every pose, so a static rotation can't
+  // keep the barrel level. Instead _aimGun() orients the gun each frame so its
+  // local +z (the barrel) points at the player's eye.
+  return g;
+}
+
+// A cowboy hat: wide brim + creased crown + band. Built in head-bone local
+// space; the head joint sits at the neck, the skull centre is ~0.11 above it,
+// so the hat is positioned to rest on top of the head.
+function buildEnemyHat() {
+  const g = new THREE.Group();
+  const felt = MAT.hatFelt, band = MAT.hatBand;
+  const add = (geo, mat, x, y, z) => {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.layers.set(LAYERS.NO_ENV);
+    g.add(m);
+    return m;
+  };
+  // brim: wide, thin, slightly upturned via a low cylinder
+  add(new THREE.CylinderGeometry(0.26, 0.28, 0.02, 20), felt, 0, 0.17, 0);
+  // crown: tapered cylinder sitting on the brim
+  add(new THREE.CylinderGeometry(0.11, 0.135, 0.16, 18), felt, 0, 0.25, 0);
+  // crease dent on top of the crown
+  add(new THREE.BoxGeometry(0.05, 0.03, 0.2), felt, 0, 0.325, 0);
+  // hat band around the crown base
+  add(new THREE.CylinderGeometry(0.14, 0.14, 0.035, 18), band, 0, 0.185, 0);
   return g;
 }
 
@@ -54,6 +82,9 @@ class EnemyUnit {
     // Visible pistol rigidly bound to the right hand so it follows the aim pose.
     this.gun = buildEnemyGun();
     rootBone.getObjectByName('right_hand').add(this.gun);
+    // Cowboy hat bound to the head so it follows head/pose rotation.
+    this.hat = buildEnemyHat();
+    rootBone.getObjectByName('head').add(this.hat);
     this.root = new THREE.Group();
     this.root.add(this.mesh);
     this.root.visible = false;
@@ -227,8 +258,24 @@ export class Enemies {
   }
 
   _faceStreet(u) {
-    // face toward the street centre (z=0) from the building side
+    // face toward the street centre (z=0) from the building side. The model's
+    // front is +z (the pistol is held forward along +z), so at yaw=0 the enemy
+    // faces +z: an enemy at z<0 faces the street at yaw=0, one at z>0 at yaw=PI.
     return u.pos.z > 0 ? Math.PI : 0;
+  }
+
+  // Smoothly turn an enemy to face the player. The model's front is +z (see
+  // _faceDir), so the desired yaw is atan2(dx, dz). Turn is rate-limited so
+  // enemies visibly rotate toward the player rather than snapping.
+  _facePlayer(u, dt) {
+    const p = this.G.player;
+    if (!p || !p.alive) return;
+    const dx = p.pos.x - u.pos.x;
+    const dz = p.pos.z - u.pos.z;
+    const desired = Math.atan2(dx, dz);
+    const diff = wrapAngle(desired - u.yaw);
+    const maxStep = ENEMY.turnRate * dt;
+    u.yaw = wrapAngle(u.yaw + clamp(diff, -maxStep, maxStep));
   }
 
   _variantMat(v) {
@@ -343,7 +390,8 @@ export class Enemies {
   }
 
   _faceDir(e, out) {
-    return out.set(-Math.sin(e.yaw), 0, -Math.cos(e.yaw));
+    // model front is +z, so at yaw=0 the enemy faces +z
+    return out.set(Math.sin(e.yaw), 0, Math.cos(e.yaw));
   }
 
   _die(enemy, weaponId, headshot) {
@@ -409,6 +457,9 @@ export class Enemies {
       this._applyPose(u, dt);
       this._syncTransform(u);
       u.root.updateMatrixWorld(true);
+      // Point the pistol barrel at the player while engaged. lookAt accounts for
+      // the hand bone's world orientation and keeps the gun upright.
+      if (u.alive && u.state !== 'idle' && player.eye) u.gun.lookAt(player.eye);
       refreshCapsules(u.boneByName, u.capsules);
       const hb = u.boneByName.head;
       u.headPos.set(0, 0.11, 0).applyMatrix4(hb.matrixWorld);
@@ -425,6 +476,9 @@ export class Enemies {
     const sdt = dt * this.speedScale;
     u.timer += sdt;
     const r = G.rng;
+    // Once engaged (any state other than idle), turn to face the player so the
+    // gun tracks them and shots are aimed at them rather than the street.
+    if (u.state !== 'idle') this._facePlayer(u, sdt);
     switch (u.state) {
       case 'idle': {
         const peekT = r.range(ENEMY.peekTime[0], ENEMY.peekTime[1]);
@@ -564,8 +618,16 @@ export class Enemies {
   _syncTransform(u) {
     u.root.position.copy(u.pos);
     u.root.rotation.y = u.yaw;
-    if (u.state === 'sinking') {
-      u.root.position.y = u.pos.y - u.phase * ENEMY.sinkDepth;
+    // The death pose tips the body horizontal around the pelvis (rest y~0.96),
+    // which would otherwise leave the corpse hovering at hip height. Lower the
+    // root as the body falls so it settles onto the ground, then keep sinking.
+    // The drop is per death mode because each tips the body a different amount.
+    if (u.state === 'dead' || u.state === 'corpse' || u.state === 'sinking') {
+      const fall = u.state === 'dead' ? u.phase : 1;
+      const drop0 = ENEMY.deathDrop[u.deathMode] ?? ENEMY.deathDrop.crumple;
+      let drop = drop0 * fall;
+      if (u.state === 'sinking') drop += u.phase * ENEMY.sinkDepth;
+      u.root.position.y = u.pos.y - drop;
     }
   }
 

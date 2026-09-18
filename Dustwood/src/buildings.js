@@ -187,8 +187,9 @@ function buildSaloon(ctx, def) {
   box(bucket, 'woodWorn', 0.2, h * 0.55, 0.2, w * 0.38, h * 0.275, -hd - 2.0, 0, 0xffffff);
   // porch roof over ground floor front
   box(bucket, 'woodPlank', w + 0.4, 0.15, 2.4, 0, h * 0.5, -hd - 1.2, 0, 0xb89a72);
-  // SALOON sign
-  plane(bucket, 'signSaloon', 4, 2, 0, h + 0.4, -hd - 0.25, 0, 0, 0xffffff);
+  // SALOON sign. ry=PI so the readable face points -z (toward the street for
+  // +z-side buildings); the group's 180° turn then keeps -z-side buildings correct.
+  plane(bucket, 'signSaloon', 4, 2, 0, h + 0.4, -hd - 0.25, 0, Math.PI, 0xffffff);
   // roof
   gableRoof(bucket, 'woodWorn', 0x6a4a30, w, d, h, 1.6);
 
@@ -222,8 +223,8 @@ function buildLivery(ctx, def) {
   for (let i = 0; i < 3; i++) box(bucket, 'woodWorn', 0.15, 1.4, d * 0.6, -w * 0.3 + i * (w * 0.3), 0.7, d * 0.15, 0, 0xffffff);
   // ladder to loft
   box(bucket, 'woodWorn', 0.6, 3.5, 0.1, 1.5, 1.75, -d * 0.1, 0.3, 0xffffff);
-  // LIVERY sign
-  plane(bucket, 'signLivery', 4.5, 1.6, 0, h * 0.82, -hd - 0.2, 0, 0, 0xffffff);
+  // LIVERY sign (ry=PI so the readable face points toward the street)
+  plane(bucket, 'signLivery', 4.5, 1.6, 0, h * 0.82, -hd - 0.2, 0, Math.PI, 0xffffff);
 
   anchors.roof.push(new THREE.Vector3(0, h + 0.3, -hd + 0.5));
   anchors.window.push(new THREE.Vector3(-w * 0.35, 1.5, -hd - 0.4));
@@ -247,6 +248,9 @@ function buildChurch(ctx, def) {
   wall(bucket, 'churchWhite', 0xffffff, 'x', -hd, -hw, hw, 0, bodyH, t, [...cwin, cdoor]);
   for (const o of cwin) { glassPane(bucket, 'x', -hd, o.u, o.y0, o.y1, o.w); windowFrame(bucket, 'x', -hd, o.u, o.y0, o.y1, o.w, t); }
   doorLeaf(bucket, 'x', -hd, 0, 0, 2.6, 1.5, 0x4a2f1a);
+  // CHURCH sign above the front door (ry=PI so the readable face points -z,
+  // toward the street for +z-side buildings; group turn keeps -z-side correct).
+  plane(bucket, 'signChurch', 3.2, 1.4, 0, bodyH - 0.7, -hd - 0.16, 0, Math.PI, 0xffffff);
   // gable roof
   gableRoof(bucket, 'woodWorn', 0x5a4030, w, d, bodyH, 1.8);
   // bell tower
@@ -304,8 +308,8 @@ function buildSheriff(ctx, def) {
   // wanted posters on porch posts
   plane(bucket, 'wantedPoster', 0.8, 1.2, -w * 0.4, 1.6, -hd - 2.11, 0, 0, 0xffffff);
   plane(bucket, 'wantedPoster', 0.8, 1.2, w * 0.4, 1.6, -hd - 2.11, 0, 0, 0xffffff);
-  // SHERIFF sign
-  plane(bucket, 'signSheriff', 3.5, 1.6, 0, h - 1.2, -hd - 0.25, 0, 0, 0xffffff);
+  // SHERIFF sign (ry=PI so the readable face points toward the street)
+  plane(bucket, 'signSheriff', 3.5, 1.6, 0, h - 1.2, -hd - 0.25, 0, Math.PI, 0xffffff);
 
   anchors.window.push(new THREE.Vector3(-w * 0.32, h * 0.6, -hd - 0.4));
   anchors.window.push(new THREE.Vector3(w * 0.32, h * 0.6, -hd - 0.4));

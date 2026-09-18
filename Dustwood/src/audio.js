@@ -175,10 +175,15 @@ export class Audio {
   _osc(type, freq) { const o = this.ctx.createOscillator(); o.type = type; o.frequency.value = freq; return o; }
 
   _acquirePanner(pos) {
+    // Accept both Vector3-like ({x,y,z}) and array ([x,y,z]) positions.
+    const x = pos.x !== undefined ? pos.x : pos[0];
+    const y = pos.y !== undefined ? pos.y : pos[1];
+    const z = pos.z !== undefined ? pos.z : pos[2];
+    if (!Number.isFinite(x) || !Number.isFinite(y) || !Number.isFinite(z)) return null;
     for (const p of this._pannerPool) {
       if (!p.busy) {
         p.busy = true;
-        p.node.positionX.value = pos[0]; p.node.positionY.value = pos[1]; p.node.positionZ.value = pos[2];
+        p.node.positionX.value = x; p.node.positionY.value = y; p.node.positionZ.value = z;
         return p;
       }
     }
@@ -187,10 +192,11 @@ export class Audio {
 
   setListener(pos, forward) {
     if (!this.ctx) return;
+    if (!pos || !Number.isFinite(pos.x) || !Number.isFinite(pos.y) || !Number.isFinite(pos.z)) return;
     const l = this.ctx.listener;
     if (l.positionX) {
       l.positionX.value = pos.x; l.positionY.value = pos.y; l.positionZ.value = pos.z;
-      if (forward) {
+      if (forward && Number.isFinite(forward.x) && Number.isFinite(forward.y) && Number.isFinite(forward.z)) {
         l.forwardX.value = forward.x; l.forwardY.value = forward.y; l.forwardZ.value = forward.z;
         l.upX.value = 0; l.upY.value = 1; l.upZ.value = 0;
       }

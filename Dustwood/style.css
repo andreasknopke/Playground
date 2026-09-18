@@ -16,7 +16,7 @@ body {
 #c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
 
 #hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
-#overlay { position: fixed; inset: 0; pointer-events: auto; z-index: 20; }
+#overlay { position: fixed; inset: 0; pointer-events: none; z-index: 20; }
 .hidden { display: none !important; }
 
 /* Crosshair */
@@ -123,7 +123,7 @@ body {
 #fps { position: absolute; left: 24px; top: 48px; font-family: "Courier New", monospace; font-size: 13px; color: #9fd08a; text-shadow: 0 1px 2px #000; }
 
 /* Screens */
-.screen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: rgba(10,8,6,0.72); backdrop-filter: blur(2px); }
+.screen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: rgba(10,8,6,0.72); backdrop-filter: blur(2px); pointer-events: auto; }
 .screen h1 { font-size: 64px; letter-spacing: 8px; color: #f2e6c8; text-shadow: 0 3px 0 #000, 0 0 30px rgba(232,178,74,0.4); }
 .screen h2 { font-size: 40px; letter-spacing: 6px; color: #f2e6c8; }
 .screen .sub { margin-top: 6px; font-size: 18px; letter-spacing: 6px; color: var(--amber); }

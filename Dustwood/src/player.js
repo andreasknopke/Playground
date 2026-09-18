@@ -123,8 +123,8 @@ export class Player {
       // move.x = strafe (+right), move.y = forward (+fwd on yaw plane)
       const fx = -Math.sin(this.yaw), fz = -Math.cos(this.yaw);
       const rx = Math.cos(this.yaw), rz = -Math.sin(this.yaw);
-      _move.x = fx * input.move.y + rx * input.x;
-      _move.z = fz * input.move.y + rz * input.x;
+      _move.x = fx * input.move.y + rx * input.move.x;
+      _move.z = fz * input.move.y + rz * input.move.x;
       _move.normalize().multiplyScalar(speed);
     }
     this.sprinting = input.sprint && input.move.lengthSq() > 0 && this.alive;

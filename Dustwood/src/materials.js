@@ -72,9 +72,12 @@ const FACTORY = {
   signSaloon: () => signMat('signSaloon'),
   signSheriff: () => signMat('signSheriff'),
   signLivery: () => signMat('signLivery'),
+  signChurch: () => signMat('signChurch'),
   wantedPoster: () => new THREE.MeshStandardMaterial({ map: getTexture('wantedPoster').map, roughness: 0.85 }),
   crossWood: () => new THREE.MeshStandardMaterial({ map: getTexture('crossWood').map, roughness: 0.9, transparent: true, alphaTest: 0.5, side: THREE.DoubleSide }),
-  enemy: () => new THREE.MeshStandardMaterial({ map: getTexture('enemyAtlas').map, roughness: 0.85, vertexColors: true }),
+  enemy: () => new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.85, vertexColors: true }),
+  hatFelt: () => new THREE.MeshStandardMaterial({ color: 0x4a3524, roughness: 0.95 }),
+  hatBand: () => new THREE.MeshStandardMaterial({ color: 0x241608, roughness: 0.8 }),
 };
 
 function stdMat(name, opts) {

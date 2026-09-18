@@ -83,27 +83,39 @@ export const HIT_CAPSULES = {
 // these (and the remaining cosmetic joints) to damage groups.
 export const PART_NAMES = Object.keys(HIT_CAPSULES);
 
-// Visual part boxes rigidly bound to a bone (bone-local centre offset + size).
+// Visual parts rigidly bound to a bone (bone-local centre offset + size).
+// shape: 'capsule' (r + cylindrical len, Y-aligned), 'sphere' (r), or 'box'
+// (w/h/d). Capsules/spheres give a rounded, human silhouette instead of blocks.
+// Segments overlap slightly so the merged body reads as one smooth figure.
+// col = per-part tint (duster coat brown, skin, bandana red, dark boots).
+const COAT = 0x6a5236, SKIN = 0xb08058, BANDANA = 0x8a2a2a, BOOT = 0x2a1c10;
 const PART_SHAPES = [
-  { part: 'pelvis', bone: 'pelvis', w: 0.30, h: 0.20, d: 0.20, y: 0.07 },
-  { part: 'spine', bone: 'spine', w: 0.30, h: 0.18, d: 0.19, y: 0.09 },
-  { part: 'chest', bone: 'chest', w: 0.34, h: 0.26, d: 0.21, y: 0.10 },
-  { part: 'neck', bone: 'neck', w: 0.10, h: 0.12, d: 0.10, y: 0.06 },
-  { part: 'head', bone: 'head', w: 0.18, h: 0.22, d: 0.19, y: 0.11 },
-  { part: 'right_shoulder', bone: 'right_shoulder', w: 0.09, h: 0.28, d: 0.09, y: -0.14 },
-  { part: 'right_elbow', bone: 'right_elbow', w: 0.08, h: 0.24, d: 0.08, y: -0.12 },
-  { part: 'right_wrist', bone: 'right_wrist', w: 0.08, h: 0.12, d: 0.06, y: -0.06 },
+  { part: 'pelvis', bone: 'pelvis', shape: 'capsule', r: 0.15, len: 0.02, y: 0.07, col: COAT },
+  { part: 'spine', bone: 'spine', shape: 'capsule', r: 0.16, len: 0.04, y: 0.09, col: COAT },
+  { part: 'chest', bone: 'chest', shape: 'capsule', r: 0.18, len: 0.06, y: 0.10, col: BANDANA },
+  { part: 'neck', bone: 'neck', shape: 'capsule', r: 0.06, len: 0.04, y: 0.06, col: SKIN },
+  { part: 'head', bone: 'head', shape: 'sphere', r: 0.12, y: 0.11, col: SKIN },
+  { part: 'right_shoulder', bone: 'right_shoulder', shape: 'capsule', r: 0.055, len: 0.17, y: -0.14, col: COAT },
+  { part: 'right_elbow', bone: 'right_elbow', shape: 'capsule', r: 0.05, len: 0.14, y: -0.12, col: COAT },
+  { part: 'right_wrist', bone: 'right_wrist', shape: 'capsule', r: 0.045, len: 0.03, y: -0.06, col: SKIN },
   // NOTE: the left arm has no visual geometry — the enemy holds the pistol with
   // one hand only, so the second (off-hand) would otherwise float near the gun
   // with fingers pointing down. The left bones remain for the skeleton/hit
   // capsules but render nothing.
-  { part: 'right_hip', bone: 'right_hip', w: 0.13, h: 0.38, d: 0.13, y: -0.19 },
-  { part: 'right_knee', bone: 'right_knee', w: 0.11, h: 0.42, d: 0.11, y: -0.21 },
-  { part: 'right_ankle', bone: 'right_ankle', w: 0.10, h: 0.10, d: 0.22, y: -0.04 },
-  { part: 'left_hip', bone: 'left_hip', w: 0.13, h: 0.38, d: 0.13, y: -0.19 },
-  { part: 'left_knee', bone: 'left_knee', w: 0.11, h: 0.42, d: 0.11, y: -0.21 },
-  { part: 'left_ankle', bone: 'left_ankle', w: 0.10, h: 0.10, d: 0.22, y: -0.04 },
+  { part: 'right_hip', bone: 'right_hip', shape: 'capsule', r: 0.075, len: 0.23, y: -0.19, col: COAT },
+  { part: 'right_knee', bone: 'right_knee', shape: 'capsule', r: 0.06, len: 0.30, y: -0.21, col: 0x4a3a28 },
+  { part: 'right_ankle', bone: 'right_ankle', shape: 'box', w: 0.10, h: 0.10, d: 0.22, y: -0.04, col: BOOT },
+  { part: 'left_hip', bone: 'left_hip', shape: 'capsule', r: 0.075, len: 0.23, y: -0.19, col: COAT },
+  { part: 'left_knee', bone: 'left_knee', shape: 'capsule', r: 0.06, len: 0.30, y: -0.21, col: 0x4a3a28 },
+  { part: 'left_ankle', bone: 'left_ankle', shape: 'box', w: 0.10, h: 0.10, d: 0.22, y: -0.04, col: BOOT },
 ];
+
+// Build the visual geometry for one part per its shape descriptor.
+function partGeometry(ps) {
+  if (ps.shape === 'sphere') return new THREE.SphereGeometry(ps.r, 16, 12);
+  if (ps.shape === 'capsule') return new THREE.CapsuleGeometry(ps.r, ps.len, 4, 12);
+  return new THREE.BoxGeometry(ps.w, ps.h, ps.d);
+}
 
 // Build a SkinnedMesh geometry with rigid bone binding + a skeleton factory,
 // following the SMPL kinematic tree.
@@ -136,10 +148,10 @@ export function buildRig() {
   // joint location plus the part's local offset.
   const geos = [];
   for (const ps of PART_SHAPES) {
-    const g = new THREE.BoxGeometry(ps.w, ps.h, ps.d);
+    const g = partGeometry(ps);
     const jr = JOINTS[BONE_INDEX[ps.bone]].pos;
     g.translate(jr[0], jr[1] + ps.y, jr[2]);
-    ensureColorAttr(g, 0xffffff);
+    ensureColorAttr(g, ps.col || 0xffffff);
     const bi = BONE_INDEX[ps.bone];
     const count = g.getAttribute('position').count;
     const si = new Uint16Array(count * 4);

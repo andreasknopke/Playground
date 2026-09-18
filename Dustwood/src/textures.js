@@ -459,6 +459,7 @@ function signTexture(text, bg, fg, font) {
 GEN.signSaloon = signTexture('SALOON', '#2a1410', '#e8c86a', FONTS.SIGN);
 GEN.signSheriff = signTexture('SHERIFF', '#1a2030', '#dfe6f0', FONTS.SIGN);
 GEN.signLivery = signTexture('LIVERY STABLE', '#241a10', '#e0c080', FONTS.SIGN);
+GEN.signChurch = signTexture('CHURCH', '#f0e8d8', '#3a2a18', FONTS.SIGN);
 
 GEN.wantedPoster = (rng) => {
   const W = 512, H = 768;
@@ -537,10 +538,33 @@ GEN.deadTree = alphaPlant('#4a3420', (ctx, S, rng, c) => {
   }
 });
 GEN.tumbleweed = alphaPlant('#8a6a3a', (ctx, S, rng, c) => {
-  ctx.strokeStyle = c; ctx.lineWidth = 2;
-  for (let i = 0; i < 60; i++) {
-    const a = rng() * Math.PI * 2, r = 20 + rng() * 60;
-    ctx.beginPath(); ctx.arc(S / 2 + Math.cos(a) * 10, S / 2 + Math.sin(a) * 10, r, a, a + 1); ctx.stroke();
+  // Loose, see-through tangle of twigs (NOT a solid ball): no filled disc, just
+  // criss-cross strokes with gaps so you can see through it, plus a few rim
+  // strands for silhouette.
+  const cx = S / 2, cy = S / 2, R = S * 0.46;
+  const tones = ['#8a6a3a', '#6f5228', '#a07c44', '#5c4322'];
+  for (let i = 0; i < 110; i++) {
+    ctx.strokeStyle = tones[(rng() * tones.length) | 0];
+    ctx.lineWidth = 1.5 + rng() * 2.5;
+    ctx.lineCap = 'round';
+    const a = rng() * Math.PI * 2;
+    const r = rng() * R;
+    const px = cx + Math.cos(a) * r, py = cy + Math.sin(a) * r;
+    const a2 = a + (rng() - 0.5) * 2.4;
+    const len = R * (0.35 + rng() * 0.6);
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + Math.cos(a2) * len, py + Math.sin(a2) * len);
+    ctx.stroke();
+  }
+  // a few long curved strands around the rim for silhouette
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 22; i++) {
+    ctx.strokeStyle = tones[(rng() * tones.length) | 0];
+    const a = rng() * Math.PI * 2, r = R * (0.7 + rng() * 0.3);
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(a) * 8, cy + Math.sin(a) * 8, r, a, a + 0.6 + rng() * 0.8);
+    ctx.stroke();
   }
 });
 

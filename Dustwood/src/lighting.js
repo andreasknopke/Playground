@@ -95,6 +95,8 @@ export class Lighting {
       post.position.set(lp.x, 2, lp.z);
       post.matrixAutoUpdate = false; post.updateMatrix();
       scene.add(post);
+      // solid collider so the player cannot walk through the lamp post
+      G.colliders.addStaticCyl(lp.x, lp.z, 0.16, 0, 4, 'lamp-post', 'wood');
     }
 
     // Glow billboard batches (instanced)

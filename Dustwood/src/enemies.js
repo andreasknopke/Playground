@@ -13,6 +13,7 @@ import {
 const _hit = { enemy: null, group: null, dist: 0, point: [0, 0, 0] };
 const _v1 = new THREE.Vector3();
 const _v2 = new THREE.Vector3();
+const _losOut = {};
 
 // A small revolver held in the right hand. Modelled in the hand's local space
 // with the barrel pointing +z (the enemy's facing at rest).
@@ -545,14 +546,20 @@ export class Enemies {
     const muzzle = TMP.v2.set(u.pos.x, u.pos.y + 1.35, u.pos.z);
     _v2.copy(_v1).normalize();
     G.bus.emit('shot-fired', { weapon: 'enemy', origin: muzzle, dir: _v2, muzzle, enemy: u, id: 'enemy' });
-    if (r() < hitChance) {
+    // line-of-sight: cover (buildings, barricades, lamp posts) blocks the shot
+    const los = G.colliders.raycast(muzzle, _v2, dist, MASK.SOLID, _losOut);
+    const blocked = los && los.dist < dist - 0.4;
+    if (!blocked && r() < hitChance) {
       const dmg = r.range(ENEMY.damage[0], ENEMY.damage[1]);
       player.applyDamage(dmg, u.pos, u);
     }
     // muzzle flash light + tracer occasionally
     G.lighting.flashMuzzle(muzzle, 6);
     if (G.particles.tracer) {
-      G.particles.tracer(muzzle, TMP.v1.set(eye.x, eye.y, eye.z), 0.008, 0.6);
+      const end = blocked
+        ? TMP.v1.set(los.pos[0], los.pos[1], los.pos[2])
+        : TMP.v1.set(eye.x, eye.y, eye.z);
+      G.particles.tracer(muzzle, end, 0.008, 0.6);
     }
   }
 

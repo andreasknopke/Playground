@@ -1,0 +1,8 @@
+# Dependencies
+node_modules/
+
+# Editor
+.vscode/
+
+# Regenerable test screenshot artifacts
+Dustwood/test/shots/

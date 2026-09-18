@@ -1,0 +1,136 @@
+/* Dustwood Gulch HUD / overlay styles. See Plan.txt §8. */
+:root {
+  --amber: #e8b24a;
+  --red: #c0392b;
+  --bone: #efe6d0;
+  --ink: #14100c;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0d10; }
+body {
+  font-family: system-ui, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color: var(--bone);
+  -webkit-user-select: none; user-select: none;
+  cursor: default;
+}
+#c { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+
+#hud { position: fixed; inset: 0; pointer-events: none; z-index: 10; }
+#overlay { position: fixed; inset: 0; pointer-events: auto; z-index: 20; }
+.hidden { display: none !important; }
+
+/* Crosshair */
+#crosshair { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
+.ch-bar { position: absolute; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.7); }
+.ch-t, .ch-b { width: 2px; height: 9px; left: -1px; }
+.ch-l, .ch-r { width: 9px; height: 2px; top: -1px; }
+.ch-t { transform: translateY(calc(-1 * var(--gap, 6px) - 9px)); }
+.ch-b { transform: translateY(var(--gap, 6px)); }
+.ch-l { transform: translateX(calc(-1 * var(--gap, 6px) - 9px)); }
+.ch-r { transform: translateX(var(--gap, 6px)); }
+#ch-dot { position: absolute; left: -1px; top: -1px; width: 2px; height: 2px; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.7); }
+
+/* Hit marker */
+#hitmarker { position: absolute; left: 50%; top: 50%; width: 0; height: 0; opacity: 0; }
+#hitmarker span { position: absolute; width: 10px; height: 2px; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,0.6); }
+#hitmarker span:nth-child(1) { transform: translate(-14px,-14px) rotate(45deg); }
+#hitmarker span:nth-child(2) { transform: translate(4px,-14px) rotate(-45deg); }
+#hitmarker span:nth-child(3) { transform: translate(-14px,12px) rotate(-45deg); }
+#hitmarker span:nth-child(4) { transform: translate(4px,12px) rotate(45deg); }
+#hitmarker.hit { animation: hitpop 120ms ease-out; }
+#hitmarker.head span { background: #ffe14a; }
+#hitmarker.head { animation: hitpop 120ms ease-out; }
+#hitmarker.kill span { background: #ff4a3a; }
+#hitmarker.kill { animation: killpop 200ms ease-out; }
+@keyframes hitpop { 0% { opacity: 1; transform: scale(1.3); } 100% { opacity: 0; transform: scale(1); } }
+@keyframes killpop { 0% { opacity: 1; transform: scale(1.6); } 100% { opacity: 0; transform: scale(1.2); } }
+
+#sprint-glyph { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%); font-size: 28px; color: var(--amber); text-shadow: 0 0 6px #000; }
+
+/* Prompt */
+#prompt { position: absolute; left: 50%; top: calc(50% + 60px); transform: translateX(-50%); font-size: 18px; letter-spacing: 1px; text-shadow: 0 1px 3px #000; opacity: 0; transition: opacity 0.15s; }
+#prompt.show { opacity: 1; }
+#prompt.pulse { animation: pulse 0.8s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* Banner */
+#banner { position: absolute; left: 50%; top: 18%; transform: translateX(-50%); text-align: center; opacity: 0; }
+#banner.show { animation: bannerin 0.2s ease-out forwards; }
+#banner.hide { animation: bannerout 0.4s ease-in forwards; }
+#banner-text {
+  display: inline-block; padding: 10px 40px; font-size: 40px; font-weight: 900; letter-spacing: 4px;
+  color: #f2e6c8; background: linear-gradient(#2a1c10, #140d07); border: 3px solid #6a4a24;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.6), inset 0 0 20px rgba(0,0,0,0.6); text-shadow: 0 2px 0 #000;
+}
+#banner-sub { margin-top: 8px; font-size: 16px; letter-spacing: 3px; color: var(--amber); text-shadow: 0 1px 2px #000; }
+@keyframes bannerin { from { opacity: 0; transform: translateX(-50%) translateY(-10px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+@keyframes bannerout { from { opacity: 1; } to { opacity: 0; } }
+
+/* Sector box (top-left) */
+#sector-box { position: absolute; left: 24px; top: 20px; }
+#sector-label { font-size: 15px; letter-spacing: 2px; color: var(--bone); text-shadow: 0 1px 2px #000; }
+#sector-sub { font-size: 13px; letter-spacing: 2px; color: var(--amber); text-shadow: 0 1px 2px #000; }
+#sector-sub.pulse { animation: pulse 1s infinite; }
+
+/* Kills (top-right) */
+#kills-box { position: absolute; right: 24px; top: 20px; font-size: 22px; color: var(--bone); text-shadow: 0 1px 2px #000; }
+#kills-icon { margin-right: 6px; color: #b8b0a0; }
+#kills-num { font-family: "Courier New", "DejaVu Sans Mono", monospace; font-weight: 700; }
+#kills-num.pop { animation: killpop 200ms ease-out; }
+
+/* Health (bottom-left) */
+#health-box { position: absolute; left: 24px; bottom: 24px; display: flex; align-items: center; gap: 10px; }
+#health-bar { position: relative; width: 220px; height: 14px; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.25); }
+#health-ghost { position: absolute; left: 0; top: 0; height: 100%; width: 100%; background: rgba(255,120,80,0.5); transition: width 0.6s ease-out; }
+#health-fill { position: absolute; left: 0; top: 0; height: 100%; width: 100%; background: #e8e0d0; }
+#health-num { font-family: "Courier New", monospace; font-size: 20px; font-weight: 700; text-shadow: 0 1px 2px #000; min-width: 34px; }
+
+/* Ammo (bottom-right) */
+#ammo-box { position: absolute; right: 24px; bottom: 24px; text-align: right; }
+#ammo-name { font-size: 13px; letter-spacing: 2px; color: var(--bone); text-shadow: 0 1px 2px #000; text-transform: uppercase; }
+#ammo-line { font-family: "Courier New", monospace; text-shadow: 0 1px 3px #000; }
+#ammo-mag { font-size: 42px; font-weight: 700; }
+#ammo-sep { font-size: 22px; margin: 0 4px; color: #b8b0a0; }
+#ammo-reserve { font-size: 22px; color: #d8d0c0; }
+#ammo-mag.low { color: var(--amber); }
+#ammo-mag.empty { color: var(--red); }
+#reload-bar { width: 120px; height: 6px; margin: 4px 0 0 auto; background: rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.2); }
+#reload-fill { height: 100%; width: 0%; background: var(--amber); }
+#ammo-pips { margin-top: 4px; display: flex; gap: 3px; justify-content: flex-end; }
+#ammo-pips .pip { width: 4px; height: 12px; background: var(--bone); }
+#ammo-pips .pip.off { background: rgba(255,255,255,0.18); }
+#reload-label { font-size: 12px; letter-spacing: 2px; color: var(--red); margin-top: 2px; }
+#reload-label.pulse { animation: pulse 0.6s infinite; }
+
+/* Prisoner (top-center) */
+#prisoner-box { position: absolute; left: 50%; top: 20px; transform: translateX(-50%); }
+#prisoner-label { font-size: 13px; letter-spacing: 2px; color: var(--amber); text-shadow: 0 1px 2px #000; }
+
+/* Damage arcs */
+#damage-arcs { position: absolute; left: 50%; top: 50%; width: 0; height: 0; }
+.arc { position: absolute; left: -70px; top: -70px; width: 140px; height: 140px; }
+.arc::before { content: ""; position: absolute; left: 50%; top: 0; transform: translateX(-50%); width: 120px; height: 12px; margin-left: -60px; background: linear-gradient(90deg, transparent, rgba(200,30,20,0.9), transparent); border-radius: 6px; }
+
+/* Vignette */
+#vignette { position: absolute; inset: 0; opacity: 0; background: radial-gradient(ellipse at center, rgba(120,0,0,0) 40%, rgba(120,0,0,1) 130%); }
+
+/* Toast */
+#toast { position: absolute; left: 50%; bottom: 120px; transform: translateX(-50%); font-size: 13px; color: #cfc7b5; background: rgba(0,0,0,0.5); padding: 4px 10px; opacity: 0; }
+#toast.show { animation: toastin 2s ease-out; }
+@keyframes toastin { 0% { opacity: 0; } 10%,80% { opacity: 1; } 100% { opacity: 0; } }
+
+/* FPS */
+#fps { position: absolute; left: 24px; top: 48px; font-family: "Courier New", monospace; font-size: 13px; color: #9fd08a; text-shadow: 0 1px 2px #000; }
+
+/* Screens */
+.screen { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: rgba(10,8,6,0.72); backdrop-filter: blur(2px); }
+.screen h1 { font-size: 64px; letter-spacing: 8px; color: #f2e6c8; text-shadow: 0 3px 0 #000, 0 0 30px rgba(232,178,74,0.4); }
+.screen h2 { font-size: 40px; letter-spacing: 6px; color: #f2e6c8; }
+.screen .sub { margin-top: 6px; font-size: 18px; letter-spacing: 6px; color: var(--amber); }
+.screen p { margin-top: 16px; font-size: 16px; color: #cfc7b5; }
+#start-hint { animation: pulse 1.4s infinite; }
+#controls { margin-top: 28px; list-style: none; font-size: 14px; color: #a89f8c; line-height: 1.9; }
+#go-stats, #win-stats { margin-top: 18px; border-collapse: collapse; font-size: 15px; color: #d8d0be; }
+#go-stats td, #win-stats td { padding: 3px 16px; text-align: left; }
+#go-stats td:last-child, #win-stats td:last-child { text-align: right; font-family: "Courier New", monospace; color: var(--bone); }
+#go-title { color: #d84a3a; }

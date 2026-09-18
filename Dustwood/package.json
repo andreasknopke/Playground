@@ -1,0 +1,16 @@
+{
+  "name": "dustwood-gulch",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Dustwood Gulch — a Wild-West FPS built with three.js r185.",
+  "scripts": {
+    "serve": "node serve.js 8080",
+    "test": "node test/smoke.js",
+    "perf": "node test/perf.js",
+    "shots": "node test/shots.js"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

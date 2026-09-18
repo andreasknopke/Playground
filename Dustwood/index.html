@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dustwood Gulch</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{"imports":{"three":"./vendor/three/three.module.js","three/addons/":"./vendor/three/addons/"}}
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">
+  <div id="crosshair">
+    <span class="ch-bar ch-t"></span><span class="ch-bar ch-b"></span>
+    <span class="ch-bar ch-l"></span><span class="ch-bar ch-r"></span>
+    <span id="ch-dot"></span>
+  </div>
+  <div id="hitmarker"><span></span><span></span><span></span><span></span></div>
+  <div id="sprint-glyph" class="hidden">&#187;</div>
+  <div id="prompt"></div>
+  <div id="banner"><div id="banner-text"></div><div id="banner-sub"></div></div>
+  <div id="sector-box"><div id="sector-label">SECTOR 1</div><div id="sector-sub"></div></div>
+  <div id="kills-box"><span id="kills-icon">&#9760;</span><span id="kills-num">0</span></div>
+  <div id="health-box">
+    <div id="health-bar"><div id="health-ghost"></div><div id="health-fill"></div></div>
+    <div id="health-num">100</div>
+  </div>
+  <div id="ammo-box">
+    <div id="ammo-name">COLT PEACEMAKER</div>
+    <div id="ammo-line"><span id="ammo-mag">6</span><span id="ammo-sep">/</span><span id="ammo-reserve">24</span></div>
+    <div id="reload-bar"><div id="reload-fill"></div></div>
+    <div id="ammo-pips"></div>
+    <div id="reload-label" class="hidden">RELOAD</div>
+  </div>
+  <div id="prisoner-box"><div id="prisoner-label">PRISONER: LOCKED</div></div>
+  <div id="damage-arcs"></div>
+  <div id="vignette"></div>
+  <div id="toast"></div>
+  <div id="fps" class="hidden">60</div>
+</div>
+<div id="overlay">
+  <div id="start" class="screen">
+    <h1>DUSTWOOD GULCH</h1>
+    <p class="sub">HIGH NOON</p>
+    <p id="start-hint">CLICK TO ENTER</p>
+    <ul id="controls">
+      <li>WASD move &#183; Shift sprint</li>
+      <li>Mouse aim &#183; LMB fire &#183; R reload</li>
+      <li>1 / 2 / 3 weapons &#183; wheel cycle &#183; F interact</li>
+    </ul>
+  </div>
+  <div id="pause" class="screen hidden"><h2>PAUSED</h2><p>click to resume</p></div>
+  <div id="gameover" class="screen hidden">
+    <h1 id="go-title">YOU DIED</h1>
+    <p id="go-reason"></p>
+    <table id="go-stats"></table>
+    <p id="go-hint">PRESS R OR CLICK TO RESTART</p>
+  </div>
+  <div id="win" class="screen hidden">
+    <h1>PRISONER FREED</h1>
+    <p id="win-sub"></p>
+    <table id="win-stats"></table>
+    <p id="win-hint">PRESS R OR CLICK TO RESTART</p>
+  </div>
+</div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
